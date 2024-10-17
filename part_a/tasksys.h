@@ -7,6 +7,9 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <iostream>
+#include <vector>
+#include <algorithm>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -79,26 +82,26 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
  * itasksys.h for documentation of the ITaskSystem interface.
  */
 class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
-    public:
-        TaskSystemParallelThreadPoolSleeping(int num_threads);
-        ~TaskSystemParallelThreadPoolSleeping();
-        const char* name();
-        void run(IRunnable* runnable, int num_total_tasks);
-        TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
-                                const std::vector<TaskID>& deps);
-        void sync();
-    private:
-        int num_threads = 0; // number of threads to include in threadpool
-        std::atomic<int> num_task_completed; //number of completed tasks
-        std::vector <std::thread> threadpool; //initialize the threadpool
-        std::queue<int> task_queue; //queue of shared tasks for each thread in the thread pool
-        std::mutex protect_mutex; // create mutex to prevent race conditions in accesses to shared queue
-        std::condition_variable trigger;
-        std::condition_variable main_finish; 
-        int num_tasks = 0; 
-        IRunnable* runnable_obj;
-        std::atomic<bool> all_tasks_completed; 
-        void runThreadwPool();
-};
+private:
+    int num_threads; // to store the threads
+    std::vector<std::thread> threadpool; // thread poll
+    std::vector<bool> thread_busy; // data structure to check if the thread is executing a task
+    std::vector<bool> running_threads;
 
+    IRunnable* runnable_; // we need to record the runnable
+    std::mutex protect_mutex; // create mutex to prevent race conditions in accesses to shared queue
+    std::condition_variable consumer; // the condition variable
+    std::condition_variable producer; // the condition variable
+    bool all_tasks_completed; 
+    int num_tasks = 0; 
+    void runThreadwPool(int i); // thread functionaility
+public:
+    TaskSystemParallelThreadPoolSleeping(int num_threads);
+    ~TaskSystemParallelThreadPoolSleeping();
+    const char* name();
+    void run(IRunnable* runnable, int num_total_tasks);
+    TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
+                                const std::vector<TaskID>& deps);
+    void sync();
+};
 #endif
