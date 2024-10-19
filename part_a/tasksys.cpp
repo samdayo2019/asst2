@@ -239,82 +239,86 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
 }
 
 TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads)
-  : ITaskSystem(num_threads), num_threads(num_threads), all_tasks_completed(false) {
-
-    thread_busy.resize(num_threads);
-    
-    std::fill(thread_busy.begin(), thread_busy.end(), true); //set all thread busy flags to 1
+    : ITaskSystem(num_threads), num_threads(num_threads), num_task_completed(0), all_tasks_completed(false) {
     threadpool.resize(num_threads);
-    for(int i = 0; i < num_threads; ++i) {
-        threadpool[i] = std::thread(&TaskSystemParallelThreadPoolSleeping::runThreadwPool, this, i);
+    for (int i = 0; i < num_threads; i++) {
+        threadpool[i] = std::thread(&TaskSystemParallelThreadPoolSleeping::runThreadwPool, this);
     }
 }
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
-  /*
-    * Here, we don't need to synchronize the code, because
-    * the thread will never write `terminate`. No matter
-    * the thread may read some corrupted value, this doesn't matter.
-  */
-  all_tasks_completed = true;
-  producer.notify_all();
-  for(int i = 0; i < num_threads; ++i) {
-    threadpool[i].join();
-  }
+    {
+        std::lock_guard<std::mutex> lock(protect_mutex);
+        all_tasks_completed = true;
+    }
+    cv_task.notify_all();
+
+    for (int i = 0; i < num_threads; i++) {
+        if (threadpool[i].joinable()) {
+            threadpool[i].join();
+        }
+    }
 }
 
-void TaskSystemParallelThreadPoolSleeping::runThreadwPool(int i) {
-  while(true) {
-    {
-      std::unique_lock<std::mutex> lock{protect_mutex};
+void TaskSystemParallelThreadPoolSleeping::runThreadwPool() {
+    while (true) {
+        int executing_task = -1;
+        {
+            std::unique_lock<std::mutex> lock(protect_mutex);
+            cv_task.wait(lock, [this] {
+                return !task_queue.empty() || all_tasks_completed;
+            });
 
-      if(!thread_busy[i]){
-        producer.wait(lock);
-      }
+            if (all_tasks_completed && task_queue.empty()) {
+                break;
+            }
 
+            if (!task_queue.empty()) {
+                executing_task = task_queue.front();
+                task_queue.pop();
+            }
+        }
+        
+        if (executing_task != -1) {
+            runnable_obj->runTask(executing_task, num_tasks);
+            int completed = num_task_completed.fetch_add(1) + 1;
+
+            if (completed == num_tasks) {
+                std::lock_guard<std::mutex> lock(protect_mutex);
+                cv_completed.notify_one();
+            }
+        }
     }
-
-    if(all_tasks_completed) return;
-    
-    int executing_task = i;
-
-    while(executing_task < num_tasks) {
-      runnable_->runTask(executing_task, num_tasks);
-      executing_task += num_threads;
-    }
-
-    {
-      std::lock_guard<std::mutex> lock{protect_mutex};
-      thread_busy[i] = false;
-      if(std::all_of(thread_busy.begin(), thread_busy.end(), [](bool status){return !status;})) {
-        consumer.notify_one();
-      }
-    }
-  }
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
-  num_tasks = num_total_tasks;
-  runnable_ = runnable;
-  {
-    std::lock_guard<std::mutex> lock{protect_mutex};
-    std::fill(thread_busy.begin(), thread_busy.end(), true);
-  }
-  producer.notify_all();
-  {
-    std::unique_lock<std::mutex> lock{protect_mutex};
+    runnable_obj = runnable;
+    num_tasks = num_total_tasks;
 
-    if(std::any_of(thread_busy.begin(), thread_busy.end(), [](bool status){return status;})){
-        consumer.wait(lock);
+    {
+        std::lock_guard<std::mutex> lock(protect_mutex);
+        for (int i = 0; i < num_tasks; i++) {
+            task_queue.push(i);
+        }
     }
-  }
+
+    cv_task.notify_all();
+
+    std::unique_lock<std::mutex> lock(protect_mutex);
+    cv_completed.wait(lock, [this] {
+        return num_task_completed.load() == num_tasks;
+    });
+
+    num_task_completed.store(0);
 }
 
 TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
-                                                    const std::vector<TaskID>& deps) {
-  return 0;
+                                                              const std::vector<TaskID>& deps) {
+    // You do not need to implement this method.
+    return 0;
 }
 
 void TaskSystemParallelThreadPoolSleeping::sync() {
-  return;
+    // You do not need to implement this method.
+    return;
 }
