@@ -1,0 +1,4 @@
+.cache/
+.vscode/
+.lazy.lua
+compile_commands.json
