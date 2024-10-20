@@ -2,11 +2,14 @@
 #define _TASKSYS_H
 
 #include "itasksys.h"
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <thread>
-#include <tuple>
+#ifdef DEBUG
+#include <unordered_map>
+#endif
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -75,16 +78,23 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
     void sync();
 
   private:
+    int num_threads;                      // the number of threads in the thread pool
+    int num_total_tasks;                  // the number of tasks that have been run
+    IRunnable* runnable;                  // the runnable object that is currently being run
     std::vector<std::thread> thread_pool; // the pool of ever-running threads
-    // A task is represented by the IRunnable object, the task ID, and the total number of tasks
-    std::deque<std::tuple<IRunnable*, int, int>> task_queue;
-    std::mutex task_queue_mutex; // lock to protect the task queue for access
+    // A task is represented by the IRunnable object and the task ID
+    std::deque<int> task_queue;
+    std::mutex task_queue_mutex;
     std::condition_variable run_signal;
-    void thread_worker(void);             // the worker function each thread is running
-    int num_tasks_completed = 0;          // the number of tasks that have been completed
-    std::mutex num_tasks_completed_mutex; // lock to protect the number of tasks completed
+    void thread_worker(void);                // the worker function each thread is running
+    std::atomic<int> num_tasks_completed{0}; // the number of tasks that have been completed
+    std::mutex num_tasks_completed_mutex;    // lock to protect the number of tasks completed
     std::condition_variable task_completed_signal;
     bool stop = false; // flag to indicate that the threads should stop
+#ifdef DEBUG
+    // the number of tasks each thread has completed
+    std::unordered_map<std::thread::id, int> tasks_per_thread;
+#endif
 };
 
 #endif

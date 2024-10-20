@@ -155,33 +155,51 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
 
 TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads)
     : ITaskSystem(num_threads) {
+
+    // Pre-allocate the thread pool so that it won't resize as we push
+    thread_pool.reserve(num_threads);
+
+    this->num_threads = num_threads;
+
     // Create `num_threads` threads in the thread pool
     // Each thread will run the `thread_worker` function
-
     for (int i = 0; i < num_threads; i++) {
         thread_pool.emplace_back(&TaskSystemParallelThreadPoolSleeping::thread_worker, this);
     }
 }
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
-    DPRINTF("Destroying TaskSystemParallelThreadPoolSpinning\n");
 
     // Notify the worker threads to stop
-    stop = true;
+    {
+        std::lock_guard<std::mutex> lock(task_queue_mutex);
+        stop = true;
+    }
     run_signal.notify_all();
 
     // Join all threads in the thread pool
     for (std::thread& thread : thread_pool) {
         thread.join();
     }
+
+    // #ifdef DEBUG
+    //     // Print out the number of tasks completed by each thread
+    //     for (auto& pair : tasks_per_thread) {
+    //         DCOUT("Thread " << pair.first << " completed " << pair.second << " tasks");
+    //     }
+    // #endif
+
+    DCOUT("TaskSystemParallelThreadPoolSleeping destroyed")
 }
 
 void TaskSystemParallelThreadPoolSleeping::thread_worker(void) {
+#ifdef DEBUG
+    tasks_per_thread[std::this_thread::get_id()] = 0;
+#endif
     // Worker thread runs forever
     while (true) {
-        // The thread will get the task from the task queue
-        std::tuple<IRunnable*, int, int> task;
-        // Create a scope for lock_guard lifetime
+        int task;
+        // Create a scope for lock lifetime
         {
             // Lock the task queue when accessing it
             std::unique_lock<std::mutex> lock(task_queue_mutex);
@@ -194,59 +212,93 @@ void TaskSystemParallelThreadPoolSleeping::thread_worker(void) {
             // If the signal was stop, check if we've finished all tasks, if not then work on it,
             // otherwise we are done
             // Note if there are more tasks remaining, then the loop is going to start over again,
-            // but the wait won't be enteted because stop should be true
+            // but the wait won't be entered because stop should be true
             if (stop && task_queue.empty()) {
                 DCOUT("Thread " << std::this_thread::get_id() << " exiting");
                 return;
             }
             assert(!task_queue.empty());
-            // Otherwise, there must be a task in the queue. Take from the back
-            task = task_queue.back();
-            task_queue.pop_back();
+            // Otherwise, there must be a task in the queue
+            task = task_queue.front();
+            task_queue.pop_front();
+
             // Upon exiting the scope, lock is automatically released, so other threads can access
             // the queue
         }
 
         // Run the task
-        std::get<0>(task)->runTask(std::get<1>(task), std::get<2>(task));
-        // Need a lock for incrementing num_tasks_completed because all threads are accessing it
-        // Also this must be placed after runTask returns so that we are sure all tasks are for real
-        // done
+        runnable->runTask(task, num_total_tasks);
+#ifdef DEBUG
+        tasks_per_thread[std::this_thread::get_id()]++;
+#endif
+
+        // Increment the completed tasks atomically
         {
-            std::unique_lock<std::mutex> lock(num_tasks_completed_mutex);
-            num_tasks_completed++;
-            // Tell `run()` function that a task has been completed
-            task_completed_signal.notify_one();
-            DPRINTF("num_tasks_completed incremented to %d\n", num_tasks_completed);
+            std::lock_guard<std::mutex> lock(num_tasks_completed_mutex);
+            num_tasks_completed.fetch_add(1);
         }
+        task_completed_signal.notify_one();
     }
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
-    for (int i = 0; i < num_total_tasks; i++) {
-        // Pushing data at the front of the queue
+
+    // Since the next run starts after the previous run is completely done, we can safely overwrite
+    // this shared variable
+    this->num_total_tasks = num_total_tasks;
+    // Since a single runnable functin is shared by all runTask calls, just need to store it once
+    this->runnable = runnable;
+
+    // Pushing data at the front of the queue
+    int batch = 4;
+    int i = 0;
+    while (i < num_total_tasks) {
+        int bound = std::min(batch, num_total_tasks - i);
         {
             std::unique_lock<std::mutex> lock(task_queue_mutex);
-            task_queue.push_front(std::make_tuple(runnable, i, num_total_tasks));
+            for (int j = 0; j < bound; j++) {
+                task_queue.push_back(i++);
+            }
         }
-        // Notify one worker thread that one task has been enqueued
-        run_signal.notify_one();
+        run_signal.notify_all();
     }
+
+    // for (int i = 0; i < num_total_tasks; i++) {
+    //     {
+    //         std::unique_lock<std::mutex> lock(task_queue_mutex);
+    //         task_queue.push_back(i);
+    //     }
+    //     run_signal.notify_one();
+    // }
+
+    // {
+    //     std::lock_guard<std::mutex> lock(task_queue_mutex);
+    //     for (int i = 0; i < num_total_tasks; i++) {
+    //         task_queue.push_back(i);
+    //     }
+    // }
+    // run_signal.notify_all();
 
     // Lock when reading num_tasks_completed
     {
         std::unique_lock<std::mutex> lock(num_tasks_completed_mutex);
         // Spin until all tasks are completed
-        while (num_tasks_completed != num_total_tasks) {
-            DPRINTF("waiting on num_tasks_completed: %d\n", num_tasks_completed);
-            // Perform next check when notified
-            task_completed_signal.wait(lock);
-        }
+        task_completed_signal.wait(lock, [this, num_total_tasks] {
+            return num_tasks_completed.load() == num_total_tasks;
+        });
     }
-    DPRINTF("All tasks completed\n");
     // Reset the number of tasks completed
-    // FIX: Do I need to protect this with a lock?
-    num_tasks_completed = 0;
+    num_tasks_completed.store(0);
+
+#ifdef DEBUG
+    // Print out the number of tasks completed by each thread
+    // Somehow this prints some threads twice..
+    for (auto& pair : tasks_per_thread) {
+        DCOUT("Thread " << pair.first << " completed " << pair.second << " tasks");
+        pair.second = 0;
+    }
+#endif
+    DPRINTF("All tasks completed\n");
 }
 
 TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable,
