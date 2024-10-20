@@ -232,36 +232,48 @@ void TaskSystemParallelThreadPoolSleeping::thread_worker(void) {
         tasks_per_thread[std::this_thread::get_id()]++;
 #endif
 
-        // Increment the completed tasks atomically
+        // Why this lock is needed:
+        // If a worker thread increments num_tasks_completed (and notifies) right after the main
+        // thread checks it (in the predicate) but before it calls wait(), the main thread might go
+        // to sleep even though num_tasks_completed was incremented and is now equal to
+        // num_total_tasks. This would result in the main thread missing the completion signal and
+        // never waking up. Even though fet_add is atomic, it doeesn't prevent this situation.
         {
             std::lock_guard<std::mutex> lock(num_tasks_completed_mutex);
+            // Increment the completed tasks atomically
             num_tasks_completed.fetch_add(1);
         }
-        task_completed_signal.notify_one();
+        // Notify once all tasks are completed, after releasing the lock
+        // This thread may potentially get switched out before not after the comparison, causing
+        // num_tasks_compelted.load() to return a different value from what we expect to see in this
+        // thread. But overall it's fine because we only need one worker to notify the main thread,
+        // even if it is not the thread that completes the last task
+        if (num_tasks_completed.load() == num_total_tasks) {
+            task_completed_signal.notify_one();
+        }
     }
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
-
     // Since the next run starts after the previous run is completely done, we can safely overwrite
     // this shared variable
     this->num_total_tasks = num_total_tasks;
     // Since a single runnable functin is shared by all runTask calls, just need to store it once
     this->runnable = runnable;
 
-    // Pushing data at the front of the queue
-    int batch = 4;
-    int i = 0;
-    while (i < num_total_tasks) {
-        int bound = std::min(batch, num_total_tasks - i);
-        {
-            std::unique_lock<std::mutex> lock(task_queue_mutex);
-            for (int j = 0; j < bound; j++) {
-                task_queue.push_back(i++);
-            }
-        }
-        run_signal.notify_all();
-    }
+    // // Pushing data at the front of the queue
+    // int batch = 4;
+    // int i = 0;
+    // while (i < num_total_tasks) {
+    //     int bound = std::min(batch, num_total_tasks - i);
+    //     {
+    //         std::unique_lock<std::mutex> lock(task_queue_mutex);
+    //         for (int j = 0; j < bound; j++) {
+    //             task_queue.push_back(i++);
+    //         }
+    //     }
+    //     run_signal.notify_all();
+    // }
 
     // for (int i = 0; i < num_total_tasks; i++) {
     //     {
@@ -271,13 +283,13 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     //     run_signal.notify_one();
     // }
 
-    // {
-    //     std::lock_guard<std::mutex> lock(task_queue_mutex);
-    //     for (int i = 0; i < num_total_tasks; i++) {
-    //         task_queue.push_back(i);
-    //     }
-    // }
-    // run_signal.notify_all();
+    {
+        std::lock_guard<std::mutex> lock(task_queue_mutex);
+        for (int i = 0; i < num_total_tasks; i++) {
+            task_queue.push_back(i);
+        }
+    }
+    run_signal.notify_all();
 
     // Lock when reading num_tasks_completed
     {
