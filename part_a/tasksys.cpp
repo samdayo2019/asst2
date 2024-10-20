@@ -65,27 +65,25 @@ void TaskSystemSerial::sync() {
 
 const char* TaskSystemParallelSpawn::name() { return "Parallel + Always Spawn"; }
 
-TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads) : ITaskSystem(num_threads) {
-    //
-    // TODO: CS149 student implementations may decide to perform setup
-    // operations (such as thread pool construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
-}
+TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads) : ITaskSystem(num_threads) {}
 
 TaskSystemParallelSpawn::~TaskSystemParallelSpawn() {}
 
 void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
-    //
-    // TODO: CS149 students will modify the implementation of this
-    // method in Part A.  The implementation provided below runs all
-    // tasks sequentially on the calling thread.
-    //
 
+    std::thread* threads = new std::thread[num_total_tasks];
+
+    // Spawn threads
     for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+        threads[i] = std::thread(&IRunnable::runTask, runnable, i, num_total_tasks);
     }
+
+    // Wait for threads to finish
+    for (int i = 0; i < num_total_tasks; i++) {
+        threads[i].join();
+    }
+
+    delete[] threads;
 }
 
 TaskID TaskSystemParallelSpawn::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
@@ -221,6 +219,7 @@ void TaskSystemParallelThreadPoolSleeping::thread_worker(void) {
             // Otherwise, there must be a task in the queue
             task = task_queue.front();
             task_queue.pop_front();
+            DCOUT("Thread " << std::this_thread::get_id() << " running task " << task);
 
             // Upon exiting the scope, lock is automatically released, so other threads can access
             // the queue
@@ -262,18 +261,19 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     this->runnable = runnable;
 
     // // Pushing data at the front of the queue
-    // int batch = 4;
-    // int i = 0;
-    // while (i < num_total_tasks) {
-    //     int bound = std::min(batch, num_total_tasks - i);
-    //     {
-    //         std::unique_lock<std::mutex> lock(task_queue_mutex);
-    //         for (int j = 0; j < bound; j++) {
-    //             task_queue.push_back(i++);
-    //         }
-    //     }
-    //     run_signal.notify_all();
-    // }
+    int batch = 4;
+    int i = 0;
+    while (i < num_total_tasks) {
+        int bound = std::min(batch, num_total_tasks - i);
+        {
+            std::lock_guard<std::mutex> lock(task_queue_mutex);
+            for (int j = 0; j < bound; j++) {
+                task_queue.push_back(i++);
+            }
+            DCOUT("Enqueued " << bound << " tasks");
+        }
+        run_signal.notify_all();
+    }
 
     // for (int i = 0; i < num_total_tasks; i++) {
     //     {
@@ -283,13 +283,15 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     //     run_signal.notify_one();
     // }
 
-    {
-        std::lock_guard<std::mutex> lock(task_queue_mutex);
-        for (int i = 0; i < num_total_tasks; i++) {
-            task_queue.push_back(i);
-        }
-    }
-    run_signal.notify_all();
+    // {
+    //     std::lock_guard<std::mutex> lock(task_queue_mutex);
+    //     for (int i = 0; i < num_total_tasks; i++) {
+    //         task_queue.push_back(i);
+    //     }
+    // }
+    // run_signal.notify_all();
+    //
+    DPRINTF("All tasks enqueued\n");
 
     // Lock when reading num_tasks_completed
     {
@@ -302,6 +304,7 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     // Reset the number of tasks completed
     num_tasks_completed.store(0);
 
+    DPRINTF("All tasks completed\n");
 #ifdef DEBUG
     // Print out the number of tasks completed by each thread
     // Somehow this prints some threads twice..
@@ -310,7 +313,6 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
         pair.second = 0;
     }
 #endif
-    DPRINTF("All tasks completed\n");
 }
 
 TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable,
