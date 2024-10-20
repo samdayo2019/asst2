@@ -157,8 +157,6 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     // Pre-allocate the thread pool so that it won't resize as we push
     thread_pool.reserve(num_threads);
 
-    this->num_threads = num_threads;
-
     // Create `num_threads` threads in the thread pool
     // Each thread will run the `thread_worker` function
     for (int i = 0; i < num_threads; i++) {
@@ -261,7 +259,7 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     this->runnable = runnable;
 
     // // Pushing data at the front of the queue
-    int batch = 4;
+    int batch = num_total_tasks / 2;
     int i = 0;
     while (i < num_total_tasks) {
         int bound = std::min(batch, num_total_tasks - i);

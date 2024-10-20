@@ -78,7 +78,6 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
     void sync();
 
   private:
-    int num_threads;                      // the number of threads in the thread pool
     int num_total_tasks;                  // the number of tasks that have been run
     IRunnable* runnable;                  // the runnable object that is currently being run
     std::vector<std::thread> thread_pool; // the pool of ever-running threads
