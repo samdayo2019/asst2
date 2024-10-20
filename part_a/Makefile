@@ -17,6 +17,9 @@ PPM_OBJ=$(addprefix $(OBJDIR)/, $(subst $(COMMONDIR)/,, $(PPM_CXX:.cpp=.o)))
 
 default: $(APP_NAME)
 
+debug: CXXFLAGS += -DDEBUG -g
+debug: $(APP_NAME)
+
 .PHONY: dirs clean
 
 dirs:
