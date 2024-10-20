@@ -2,6 +2,11 @@
 #define _TASKSYS_H
 
 #include "itasksys.h"
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <tuple>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -68,6 +73,18 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
     TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                             const std::vector<TaskID>& deps);
     void sync();
+
+  private:
+    std::vector<std::thread> thread_pool; // the pool of ever-running threads
+    // A task is represented by the IRunnable object, the task ID, and the total number of tasks
+    std::deque<std::tuple<IRunnable*, int, int>> task_queue;
+    std::mutex task_queue_mutex; // lock to protect the task queue for access
+    std::condition_variable run_signal;
+    void thread_worker(void);             // the worker function each thread is running
+    int num_tasks_completed = 0;          // the number of tasks that have been completed
+    std::mutex num_tasks_completed_mutex; // lock to protect the number of tasks completed
+    std::condition_variable task_completed_signal;
+    bool stop = false; // flag to indicate that the threads should stop
 };
 
 #endif
