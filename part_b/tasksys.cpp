@@ -503,6 +503,20 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
 
     // Record the run information
     RunInfo* run_info = new RunInfo{runnable, num_total_tasks};
+    for (RunID dep : deps) {
+        // Add the dependencies to deps list if they are not done
+        // Also add this run to the dep_by of the dependencies so that when they are done we
+        // know what blocked runs to check
+        // This requires the run_records to be locked
+        if (!run_records[dep]->is_done) {
+            run_info->deps.insert(dep);
+            // NOTE: this assumes all the dependeices have to call this function prior to this
+            // run so their records are stored
+            run_records[dep]->dep_by.insert(run_id);
+        }
+    }
+
+    // Lock the whole run_records to insert the new run because it may cause rehashing
     {
         std::lock_guard<std::mutex> lock(run_records_mutex);
         for (RunID dep : deps) {
