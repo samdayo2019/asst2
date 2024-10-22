@@ -598,12 +598,13 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
 
     DPRINTF("Number of items left in action queue: %lu\n", wait_list_action_queue.size());
 
+    // Actually, not clearing won't cause functional error, it's just that the next time wait list
+    // checks on action it may waste some cycles
     // Clear wait list action queue so it doesn't affect the next run
     // Don't need to lock here since no contention after sync is called
-    while (!wait_list_action_queue.empty()) {
-        wait_list_action_queue.pop();
-    }
-    DCOUT("Worker threads sync called");
+    // while (!wait_list_action_queue.empty()) {
+    //     wait_list_action_queue.pop();
+    // }
 
 #ifdef DEBUG
     // Print out the number of tasks completed by each thread
