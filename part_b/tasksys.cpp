@@ -462,8 +462,8 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
         // the entire loop
         // TODO: need to figure out how to not lock the entire run_records
         run_records_mutex.lock();
-        // TODO: if this holds true then we don't have to reset action_run
-        ASSERT(action_run != -1);
+
+        std::vector<RunID> became_ready;
 
         // wait_list is a set, since we know the dep_by of the run just finished, we directly
         // look them up and see if that's ready to go now
@@ -473,21 +473,24 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
             // If no more dependencies, push the run to the ready queue and remove it from
             // wait list
             if (run_records[dep]->deps.empty()) {
-                {
-                    std::lock_guard<std::mutex> lock(ready_queue_mutex);
-                    ready_queue.push(dep);
-                }
-                DCOUT("Run #" << dep << " moved from wait list to ready queue");
-                // Notify ready_queue_handler that there is a new run to process
-                ready_queue_signal.notify_one();
-                {
-                    std::lock_guard<std::mutex> lock(wait_list_mutex);
-                    wait_list.erase(dep);
-                }
+                became_ready.push_back(dep);
             }
         }
         run_records_mutex.unlock();
-        action_run = -1;
+
+        for (RunID run : became_ready) {
+            {
+                std::lock_guard<std::mutex> lock(ready_queue_mutex);
+                ready_queue.push(run);
+            }
+            DCOUT("Run #" << dep << " moved from wait list to ready queue");
+            // Notify ready_queue_handler that there is a new run to process
+            ready_queue_signal.notify_one();
+            {
+                std::lock_guard<std::mutex> lock(wait_list_mutex);
+                wait_list.erase(run);
+            }
+        }
     }
 }
 
