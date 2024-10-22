@@ -589,12 +589,12 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
         DCOUT("Task queue synced");
     }
 
+    DCOUT("Number of items left in action queue: %lu\n", wait_list_action_queue.size());
+
     // Clear wait list action queue so it doesn't affect the next run
-    {
-        std::lock_guard<std::mutex> lock(wait_list_action_mutex);
-        while (!wait_list_action_queue.empty()) {
-            wait_list_action_queue.pop();
-        }
+    // Don't need to lock here since no contention after sync is called
+    while (!wait_list_action_queue.empty()) {
+        wait_list_action_queue.pop();
     }
     DCOUT("Worker threads sync called");
 }
