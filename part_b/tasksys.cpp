@@ -202,6 +202,8 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
 
 void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
     DCOUT("Worker thread " << worker_id << " started");
+    RunID run_id = -1;
+    RunInfo* run_info = nullptr;
 
     while (true) {
         std::pair<RunID, int> task;
@@ -210,12 +212,6 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
             worker_signal.wait(
                 lock, [this] { return !task_queue.empty() || task_queue_sync_flag || stop; });
 
-            // NOTE: checking sync flag is put here because we must wait until the final task
-            // completes. It's inside this if body so this check occurs less often, since we know
-            // the last task must complete a run.
-            // Since at this point wait list is already synced, further runs in action queue are
-            // useless (nothing depends on them). Need to remember clear it in sync so it doesn't
-            // affect the next run
             if (task_queue_sync_flag && task_queue.empty()) {
                 DCOUT("Worker thread " << worker_id << " received sync signal");
 
@@ -270,37 +266,35 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
             }
         }
 
-        // Find the run info from the run_records table, save it to local variable so we can release
-        RunInfo* run_info;
-        {
-            std::lock_guard<std::mutex> lock(run_records_mutex);
-            auto run_it = run_records.find(task.first);
-            ASSERT(run_it != run_records.end());
-            run_info = run_it->second;
+        // Save both the run_id and run_info, compare to last run_id, if same then avoid lookup
+        if (run_id == task.first) {
+            // Run the task
+            run_info->runnable->runTask(task.second, run_info->num_total_tasks);
+        } else {
+            run_id = task.first;
+            // Find the run info from the run_records table
+            {
+                std::lock_guard<std::mutex> lock(run_records_mutex);
+                auto run_it = run_records.find(task.first);
+                ASSERT(run_it != run_records.end());
+                run_info = run_it->second;
+            }
+            // Run the task
+            run_info->runnable->runTask(task.second, run_info->num_total_tasks);
         }
 
-        // Run the task
-        run_info->runnable->runTask(task.second, run_info->num_total_tasks);
-
-        int num_tasks_completed;
-        // Update the number of completed tasks for this run, if all tasks are completed, mark it
-        // as done
+        // Update the number of completed tasks for this run, if all completed, mark it as done
         // Note here we only need to lock this run entry in the table so that other threads won't
-        // access it at the same time I think insertion to run_records won't affect this pointer
-        {
-            std::lock_guard<std::mutex> lock(run_info->run_mutex);
-            // Save to local variable so we can release lock earlier
-            // TODO: change this to atomic and see if it improves performance
-            num_tasks_completed = ++run_info->num_tasks_completed;
-        }
-
-        if (num_tasks_completed == run_info->num_total_tasks) {
+        // write to it at the same time
+        // I think insertion to run_records won't affect this pointer
+        run_info->run_mutex.lock();
+        // TODO: change this to atomic and see if it improves performance
+        ++run_info->num_tasks_completed;
+        if (run_info->num_tasks_completed == run_info->num_total_tasks) {
             DCOUT("Run #" << task.first << " completed by worker thread " << worker_id);
             // Mark the run as done
-            {
-                std::lock_guard<std::mutex> lock(run_info->run_mutex);
-                run_info->is_done = true;
-            }
+            run_info->is_done = true;
+            run_info->run_mutex.unlock();
 
             // Push the completed run to the action queue and notify wait_list_handler
             {
@@ -312,6 +306,8 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
             // No need to notify wait_list_signal here because if handler got blocked there it means
             // wait list is empty, so no run can become ready
             wait_list_action_signal.notify_one();
+        } else {
+            run_info->run_mutex.unlock();
         }
     }
 }
@@ -455,9 +451,10 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
             });
         }
 
+        // Because we must look up the run record for each dep_by, we lock the whole run_records for
+        // the entire loop
         // TODO: need to figure out how to not lock the entire run_records
         run_records_mutex.lock();
-
         // TODO: if this holds true then we don't have to reset action_run
         ASSERT(action_run != -1);
 
@@ -507,7 +504,6 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
         // Add the dependencies to deps list if they are not done
         // Also add this run to the dep_by of the dependencies so that when they are done we
         // know what blocked runs to check
-        // This requires the run_records to be locked
         if (!run_records[dep]->is_done) {
             run_info->deps.insert(dep);
             // NOTE: this assumes all the dependeices have to call this function prior to this
@@ -519,19 +515,6 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     // Lock the whole run_records to insert the new run because it may cause rehashing
     {
         std::lock_guard<std::mutex> lock(run_records_mutex);
-        for (RunID dep : deps) {
-            // Add the dependencies to deps list if they are not done
-            // Also add this run to the dep_by of the dependencies so that when they are done we
-            // know what blocked runs to check
-            // This requires the run_records to be locked
-            // TODO: technically we don't have to lock the whole map
-            if (!run_records[dep]->is_done) {
-                run_info->deps.insert(dep);
-                // NOTE: this assumes all the dependeices have to call this function prior to this
-                // run so their records are stored
-                run_records[dep]->dep_by.insert(run_id);
-            }
-        }
         run_records[run_id] = run_info;
     }
 
