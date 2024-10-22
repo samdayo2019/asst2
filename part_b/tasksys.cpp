@@ -171,6 +171,9 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     // Each thread will run the `thread_worker` function
     for (int i = 0; i < num_threads; i++) {
         thread_pool.emplace_back(&TaskSystemParallelThreadPoolSleeping::worker_thread, this, i);
+#ifdef DEBUG
+        tasks_per_thread[i] = 0;
+#endif
     }
 }
 
@@ -282,6 +285,10 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
             // Run the task
             run_info->runnable->runTask(task.second, run_info->num_total_tasks);
         }
+
+#ifdef DEBUG
+        tasks_per_thread[worker_id]++;
+#endif
 
         // Update the number of completed tasks for this run, if all completed, mark it as done
         // Note here we only need to lock this run entry in the table so that other threads won't
@@ -589,7 +596,7 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
         DCOUT("Task queue synced");
     }
 
-    DCOUT("Number of items left in action queue: %lu\n", wait_list_action_queue.size());
+    DPRINTF("Number of items left in action queue: %lu\n", wait_list_action_queue.size());
 
     // Clear wait list action queue so it doesn't affect the next run
     // Don't need to lock here since no contention after sync is called
@@ -597,6 +604,17 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
         wait_list_action_queue.pop();
     }
     DCOUT("Worker threads sync called");
+
+#ifdef DEBUG
+    // Print out the number of tasks completed by each thread
+    // Somehow this prints some threads twice..
+    for (auto& pair : tasks_per_thread) {
+        std::cout << "Thread " << pair.first << " completed " << pair.second << " tasks"
+                  << std::endl;
+        pair.second = 0;
+    }
+    printf("\n");
+#endif
 }
 
 // TODO: looks like I need to implement this for part b as well

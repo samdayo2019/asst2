@@ -124,6 +124,10 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
     std::condition_variable wait_list_synced, ready_queue_synced, task_queue_synced;
     std::condition_variable sync_completed;
     bool stop = 0;
+#ifdef DEBUG
+    // the number of tasks each thread has completed
+    std::unordered_map<int, int> tasks_per_thread;
+#endif
 };
 
 #endif
