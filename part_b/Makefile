@@ -25,6 +25,9 @@ dirs:
 clean:
 	/bin/rm -rf $(OBJDIR) *.ppm *~ $(APP_NAME)
 
+debug: CXXFLAGS += -DDEBUG -g
+debug: $(APP_NAME)
+
 OBJS=$(PPM_OBJ) $(OBJDIR)/tasksys.o
 
 $(APP_NAME): clean dirs $(OBJS)
