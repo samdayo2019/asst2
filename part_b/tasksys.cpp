@@ -161,10 +161,7 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
 
     // Pre-allocate the thread pool so that it won't resize as we push
     thread_pool.reserve(num_threads);
-    // task_queues.resize(num_threads);
 
-    ready_queue_handler_thread =
-        std::thread(&TaskSystemParallelThreadPoolSleeping::ready_queue_handler, this);
     wait_list_handler_thread =
         std::thread(&TaskSystemParallelThreadPoolSleeping::wait_list_handler, this);
 
@@ -179,16 +176,9 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     DCOUT("Destructor called");
-    // task_queue_mutex.lock();
-    // wait_list_mutex.lock();
-    // ready_queue_mutex.lock();
     stop = true;
-    // task_queue_mutex.unlock();
-    // wait_list_mutex.unlock();
-    // ready_queue_mutex.unlock();
     wait_list_active_signal.notify_one();
-    ready_queue_signal.notify_one();
-    worker_signal.notify_all();
+    ready_queue_signal.notify_all();
 
     // Delete all RunInfo objects in run_records
     for (auto& run_record : run_records) {
@@ -196,7 +186,6 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     }
 
     // Join all threads
-    ready_queue_handler_thread.join();
     wait_list_handler_thread.join();
     for (std::thread& thread : thread_pool) {
         thread.join();
@@ -209,167 +198,141 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
     RunInfo* run_info = nullptr;
 
     while (true) {
-        std::pair<RunID, int> task;
         {
-            std::unique_lock<std::mutex> lock(task_queue_mutex);
-            worker_signal.wait(
-                lock, [this] { return !task_queue.empty() || task_queue_sync_flag || stop; });
+            DCOUT("Worker thread " << worker_id << " re-entered");
+            std::unique_lock<std::mutex> lock(ready_queue_mutex);
+            ready_queue_signal.wait(
+                lock, [this] { return !ready_queue.empty() || ready_queue_sync_flag || stop; });
 
-            if (task_queue_sync_flag && task_queue.empty()) {
+            DCOUT("Worker thread " << worker_id << " unblocked");
+
+            if (ready_queue_sync_flag && ready_queue.empty()) {
                 DCOUT("Worker thread " << worker_id << " received sync signal");
 
-                // After the last task is popped from queue by a thread, that thread may still be
-                // working on it when this thread gets here, but the task is not officially done.
-                // We check run_records to see if all runs are done
+                // After the last run is popped from queue by a thread, there's no guarantee the
+                // last task is completed because num_tasks_completed is incremented before
+                // the task is run. However, is_done is marked after the task is last task is done,
+                // so we can check if all runs are done, put to sleep if not.
                 // TODO: there may be a more efficient way to do this
 
-                // Don't think I need to lock it here since it won't get pushed after sync is called
                 bool all_runs_done = true;
-                for (auto& run_record : run_records) {
-                    if (run_record.second->is_done == false) {
-                        all_runs_done = false;
-                        break;
+                {
+                    std::lock_guard<std::mutex> lock2(run_records_mutex);
+                    for (auto& run_record : run_records) {
+                        if (run_record.second->is_done == false) {
+                            all_runs_done = false;
+                            break;
+                        }
                     }
                 }
-                // If not all runs are done, we put this thread to sleep
+
                 if (!all_runs_done) {
                     DCOUT("Worker thread " << worker_id << " put to sleep, waiting for sync");
-                    task_queue_synced.wait(lock, [this] { return !task_queue_sync_flag; });
+                    ready_queue_synced.wait(lock, [this] { return !ready_queue_sync_flag; });
                     DCOUT("Worker thread " << worker_id << " woke up after sync");
                     continue;
                 } else {
                     // All runs are done, acknowledge the sync signal
                     DCOUT("Worker thread " << worker_id << " acknowledges sync signal");
-                    task_queue_sync_flag = false;
+                    ready_queue_sync_flag = false;
                     // This notifies both sync function and all other worker threads
-                    task_queue_synced.notify_all();
-
+                    ready_queue_synced.notify_all();
                     continue;
                 }
             }
+        }
 
-            if (stop) {
-                DCOUT("Worker thread " << worker_id << " exiting");
-                return;
-            }
+        if (stop) {
+            DCOUT("Worker thread " << worker_id << " exiting");
+            return;
+        }
 
-            // task queue may be empty if sync is called, and the final task has been pop by another
-            // thread but it's still working on it
-            if (!task_queue.empty()) {
-                task = task_queue.front();
-                task_queue.pop();
-                DCOUT("Worker thread " << worker_id << " got run #" << task.first << " task #"
-                                       << task.second);
-
+        RunID front_run;
+        int task_id;
+        // Get the current head of the ready queue
+        {
+            std::lock_guard<std::mutex> lock(ready_queue_mutex);
+            if (!ready_queue.empty()) {
+                front_run = ready_queue.front();
+                DCOUT("Worker thread " << worker_id << " takes run #" << front_run
+                                       << " from ready queue");
             } else {
-                // TODO: this will cause busy wait until sync flag is unset. It occurs only at the
-                // very end of a sync call so it's infrequent
+                // TODO: this will cause busy wait until sync flag is unset because
+                // worker_signal won't block. It occurs only at the very end of a sync call
+                // so it's infrequent
                 DCOUT("Worker thread " << worker_id << " woke up but no task to run");
                 continue;
             }
         }
 
-        // Save both the run_id and run_info, compare to last run_id, if same then avoid lookup
-        if (run_id == task.first) {
-            // Run the task
-            run_info->runnable->runTask(task.second, run_info->num_total_tasks);
-        } else {
-            run_id = task.first;
-            // Find the run info from the run_records table
+        // This saves the run id and info in local variable, check if run id has changed,
+        // only do lookup if it changed
+        if (run_id != front_run) {
+            run_id = front_run;
             {
                 std::lock_guard<std::mutex> lock(run_records_mutex);
-                auto run_it = run_records.find(task.first);
+                auto run_it = run_records.find(run_id);
                 ASSERT(run_it != run_records.end());
                 run_info = run_it->second;
             }
-            // Run the task
-            run_info->runnable->runTask(task.second, run_info->num_total_tasks);
+        }
+
+        run_info->run_mutex.lock();
+        // TODO: change this to atomic and see if it improves performance
+        task_id = run_info->num_tasks_completed++;
+        run_info->run_mutex.unlock();
+
+        // If this is the last task, pop from the ready queue
+        if (task_id == run_info->num_total_tasks - 1) {
+            {
+                std::unique_lock<std::mutex> lock(ready_queue_mutex);
+                DCOUT("Worker thread " << worker_id << " pops run #" << front_run
+                                       << " from ready queue");
+                ready_queue.pop();
+            }
+            ready_queue_popped.notify_all();
+        } else if (task_id >= run_info->num_total_tasks) {
+            // It's possible that other thread already got this run from the queue before the thread
+            // took last task popped it, so double check
+            DCOUT("Worker thread " << worker_id << " took overflowed run #" << run_id << " task #"
+                                   << task_id << ", wait for it to be popped");
+            {
+                std::unique_lock<std::mutex> lock(ready_queue_mutex);
+                ready_queue_popped.wait(lock, [this, front_run] {
+                    return ready_queue.empty() || ready_queue.front() != front_run;
+                });
+            }
+            continue;
+        }
+
+        // Run the task
+        run_info->runnable->runTask(task_id, run_info->num_total_tasks);
+
+        DCOUT("Worker thread " << worker_id << " executed run #" << run_id << " task #" << task_id);
+        if (task_id == run_info->num_total_tasks - 1) {
+            DCOUT("Run #" << run_id << " completed by worker thread " << worker_id);
+            // The task must be completely done before marking it done
+            run_info->run_mutex.lock();
+            run_info->is_done = true;
+            run_info->run_mutex.unlock();
+
+            // Push the completed run to the action queue and notify
+            // wait_list_handler Notice how this thread that issues the action may
+            // not be the thread the finished the task
+            {
+                std::lock_guard<std::mutex> lock(wait_list_action_mutex);
+                DCOUT("Worker thread " << worker_id << " pushed run #" << front_run
+                                       << " to action queue");
+                wait_list_action_queue.push(front_run);
+            }
+            // No need to notify wait_list_signal here because if handler got
+            // blocked there it means wait list is empty, so no run can become ready
+            wait_list_action_signal.notify_one();
         }
 
 #ifdef DEBUG
         tasks_per_thread[worker_id]++;
 #endif
-
-        // Update the number of completed tasks for this run, if all completed, mark it as done
-        // Note here we only need to lock this run entry in the table so that other threads won't
-        // write to it at the same time
-        // I think insertion to run_records won't affect this pointer
-        run_info->run_mutex.lock();
-        // TODO: change this to atomic and see if it improves performance
-        ++run_info->num_tasks_completed;
-        if (run_info->num_tasks_completed == run_info->num_total_tasks) {
-            DCOUT("Run #" << task.first << " completed by worker thread " << worker_id);
-            // Mark the run as done
-            run_info->is_done = true;
-            run_info->run_mutex.unlock();
-
-            // Push the completed run to the action queue and notify wait_list_handler
-            {
-                std::lock_guard<std::mutex> lock(wait_list_action_mutex);
-                DCOUT("Worker thread " << worker_id << " pushed run #" << task.first
-                                       << " to action queue");
-                wait_list_action_queue.push(task.first);
-            }
-            // No need to notify wait_list_signal here because if handler got blocked there it means
-            // wait list is empty, so no run can become ready
-            wait_list_action_signal.notify_one();
-        } else {
-            run_info->run_mutex.unlock();
-        }
-    }
-}
-
-/**
- * Ready queue is more like the worker thread style because it can always try to empty the queue
- */
-void TaskSystemParallelThreadPoolSleeping::ready_queue_handler() {
-    DCOUT("Ready queue handler started");
-    while (true) {
-        RunID run_id;
-        {
-            std::unique_lock<std::mutex> lock(ready_queue_mutex);
-            ready_queue_signal.wait(
-                lock, [this] { return !ready_queue.empty() || ready_queue_sync_flag || stop; });
-
-            if (ready_queue_sync_flag && ready_queue.empty()) {
-                DCOUT("Ready queue handler received sync signal");
-                // Reset the flag
-                // {
-                //     std::unique_lock<std::mutex> lock(sync_mutex);
-                ready_queue_sync_flag = false;
-                // }
-                // Notify sync that ready queue is empty
-                ready_queue_synced.notify_one();
-                continue;
-            }
-
-            if (stop) {
-                DCOUT("Ready queue handler exiting");
-                return;
-            }
-
-            ASSERT(!ready_queue.empty());
-
-            // Get the next run from the ready queue and dispatch tasks
-            // TODO: may be able to improve by emptying ready_queue in each go
-            run_id = ready_queue.front();
-            ready_queue.pop();
-        }
-
-        // Dispatch tasks of the run to task queue
-        {
-            std::lock_guard<std::mutex> lock(task_queue_mutex);
-            run_records_mutex.lock();
-            RunInfo* run_info = run_records[run_id];
-            run_records_mutex.unlock();
-
-            for (int i = 0; i < run_info->num_total_tasks; i++) {
-                task_queue.push(std::make_pair(run_id, i));
-            }
-            DCOUT("Run #" << run_id << " dispatched to task queue");
-        }
-        // Notify threads that there are tasks to run
-        worker_signal.notify_all();
     }
 }
 
@@ -451,8 +414,8 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
                     action_run = wait_list_action_queue.front();
                     wait_list_action_queue.pop();
 
-                    DCOUT("Wait list handler received action signal: run " << action_run
-                                                                           << " completed");
+                    DCOUT("Wait list handler received action signal: run #" << action_run
+                                                                            << " completed");
                     return true;
                 }
             });
@@ -461,31 +424,32 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
         // Because we must look up the run record for each dep_by, we lock the whole run_records for
         // the entire loop
         // TODO: need to figure out how to not lock the entire run_records
-        run_records_mutex.lock();
 
         std::vector<RunID> became_ready;
+        {
+            std::lock_guard<std::mutex> lock(run_records_mutex);
 
-        // wait_list is a set, since we know the dep_by of the run just finished, we directly
-        // look them up and see if that's ready to go now
-        for (RunID dep : run_records[action_run]->dep_by) {
-            // Erase this run from the dep list
-            run_records[dep]->deps.erase(action_run);
-            // If no more dependencies, push the run to the ready queue and remove it from
-            // wait list
-            if (run_records[dep]->deps.empty()) {
-                became_ready.push_back(dep);
+            // wait_list is a set, since we know the dep_by of the run just finished, we directly
+            // look them up and see if that's ready to go now
+            for (RunID dep : run_records[action_run]->dep_by) {
+                // Erase this run from the dep list
+                run_records[dep]->deps.erase(action_run);
+                // If no more dependencies, push the run to the ready queue and remove it from
+                // wait list
+                if (run_records[dep]->deps.empty()) {
+                    became_ready.push_back(dep);
+                }
             }
         }
-        run_records_mutex.unlock();
 
         for (RunID run : became_ready) {
             {
                 std::lock_guard<std::mutex> lock(ready_queue_mutex);
                 ready_queue.push(run);
             }
-            DCOUT("Run #" << dep << " moved from wait list to ready queue");
-            // Notify ready_queue_handler that there is a new run to process
-            ready_queue_signal.notify_one();
+            DCOUT("Run #" << run << " moved from wait list to ready queue");
+            // Notify worker threads that a run has become ready
+            ready_queue_signal.notify_all();
             {
                 std::lock_guard<std::mutex> lock(wait_list_mutex);
                 wait_list.erase(run);
@@ -537,8 +501,8 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
             ready_queue.push(run_id);
             DCOUT("Run #" << run_id << " pushed to ready queue");
         }
-        // Tell ready_queue_handler that there is a new run to process
-        ready_queue_signal.notify_one();
+        // A run has multiple tasks so multiple worker threads can work on it
+        ready_queue_signal.notify_all();
     } else {
         {
             std::lock_guard<std::mutex> lock(wait_list_mutex);
@@ -578,25 +542,12 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
         ready_queue_sync_flag = true;
         DCOUT("Ready queue sync called");
     }
-    ready_queue_signal.notify_one();
+    ready_queue_signal.notify_all();
 
     {
         std::unique_lock<std::mutex> lock(ready_queue_mutex);
         ready_queue_synced.wait(lock, [this] { return !ready_queue_sync_flag; });
         DCOUT("Ready queue synced");
-    }
-
-    {
-        std::unique_lock<std::mutex> lock(task_queue_mutex);
-        task_queue_sync_flag = true;
-        DCOUT("Task queue sync called");
-    }
-    worker_signal.notify_all();
-
-    {
-        std::unique_lock<std::mutex> lock(task_queue_mutex);
-        task_queue_synced.wait(lock, [this] { return !task_queue_sync_flag; });
-        DCOUT("Task queue synced");
     }
 
     DPRINTF("Number of items left in action queue: %lu\n", wait_list_action_queue.size());
