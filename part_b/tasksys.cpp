@@ -213,9 +213,12 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
     while (true) {
         TaskInfo task;
         {
+            DCOUT("Worker thread " << worker_id << " re-entered");
             std::unique_lock<std::mutex> lock(task_queue_mutex);
             worker_signal.wait(
                 lock, [this] { return !task_queue.empty() || task_queue_sync_flag || stop; });
+
+            DCOUT("Worker thread " << worker_id << " unblocked");
 
             if (task_queue_sync_flag && task_queue.empty()) {
                 DCOUT("Worker thread " << worker_id << " received sync signal");
@@ -255,20 +258,11 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
                 return;
             }
 
-            // task queue may be empty if sync is called, and the final task has been pop by another
-            // thread but it's still working on it
-            if (!task_queue.empty()) {
-                task = task_queue.front();
-                task_queue.pop();
-                DCOUT("Worker thread " << worker_id << " got run #" << task.run_id << " task ["
-                                       << task.task_first << ", " << task.task_last << "]");
-
-            } else {
-                // TODO: this will cause busy wait until sync flag is unset. It occurs only at the
-                // very end of a sync call so it's infrequent
-                DCOUT("Worker thread " << worker_id << " woke up but no task to run");
-                continue;
-            }
+            ASSERT(!task_queue.empty());
+            task = task_queue.front();
+            task_queue.pop();
+            DCOUT("Worker thread " << worker_id << " got run #" << task.run_id << " task ["
+                                   << task.task_first << ", " << task.task_last << "]");
         }
 
         // Save both the run_id and run_info, compare to last run_id, if same then avoid lookup
@@ -410,9 +404,9 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
             // wait list
             if (dep_it->second->deps.empty()) {
                 {
-                    int num_tasks = dep_it->second->num_total_tasks / num_threads == 0 ? 1
-                                                                                      : dep_it->second->num_total_tasks /
-                                                                                            num_threads;
+                    int num_tasks = dep_it->second->num_total_tasks / num_threads == 0
+                                        ? 1
+                                        : dep_it->second->num_total_tasks / num_threads;
                     std::lock_guard<std::mutex> lock(task_queue_mutex);
                     int i = 0;
                     while (i < dep_it->second->num_total_tasks) {
@@ -481,9 +475,9 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     // If no deps remaining, push the run to the ready queue, otherwise push it to the wait list
     if (run_info->deps.empty()) {
         {
-            int num_tasks = run_info->num_total_tasks / num_threads == 0 ? 1
-                                                                        : run_info->num_total_tasks /
-                                                                              num_threads;
+            int num_tasks = run_info->num_total_tasks / num_threads == 0
+                                ? 1
+                                : run_info->num_total_tasks / num_threads;
             std::lock_guard<std::mutex> lock(task_queue_mutex);
             int i = 0;
             while (i < run_info->num_total_tasks) {
