@@ -98,26 +98,19 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
     std::mutex task_queue_mutex;
     std::condition_variable worker_signal; // signal to wake up worker thread
     // std::vector<std::queue<TaskInfo>> task_queues;
-    std::queue<RunID> ready_queue;
-    std::mutex ready_queue_mutex;
-    std::condition_variable ready_queue_signal;
-    void ready_queue_handler(void);
-    std::thread ready_queue_handler_thread;
     std::unordered_set<RunID> wait_list;
     std::mutex wait_list_mutex;
     void wait_list_handler(void);
     std::thread wait_list_handler_thread;
     void worker_thread(int worker_id);
     std::condition_variable wait_list_empty_signal;
-    std::condition_variable ready_queue_empty_signal;
     std::queue<RunID> wait_list_action_queue;
     std::mutex wait_list_action_mutex;
     std::condition_variable wait_list_action_signal;
     std::condition_variable wait_list_active_signal;
     bool wait_list_sync_flag = false;
-    bool ready_queue_sync_flag = false;
     bool task_queue_sync_flag = false;
-    std::condition_variable wait_list_synced, ready_queue_synced, task_queue_synced;
+    std::condition_variable wait_list_synced, task_queue_synced;
     std::condition_variable sync_completed;
     bool stop = 0;
 #ifdef DEBUG
