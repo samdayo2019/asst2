@@ -2,6 +2,7 @@
 #define _TASKSYS_H
 
 #include "itasksys.h"
+#include <atomic>
 #include <condition_variable>
 #include <map>
 #include <mutex>
@@ -94,27 +95,34 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
         RunInfo(IRunnable* runnable, int num_total_tasks)
             : runnable(runnable), num_total_tasks(num_total_tasks) {}
     };
+
+    struct TaskQueue {
+        std::queue<std::pair<RunID, int>> queue; // (run_id, task_id)
+        std::mutex mutex;
+        std::condition_variable signal;
+        bool sync_flag = false;
+
+    };
+
+    int num_threads;
     std::map<RunID, RunInfo*> run_records; // lookup table for run information
     RunID next_run_id = 0;
-    std::vector<std::thread> thread_pool;
-    std::queue<std::pair<RunID, int>> task_queue; // (run_id, task_id)
-    std::mutex task_queue_mutex;
-    std::condition_variable worker_signal; // signal to wake up worker thread
-    // std::vector<std::queue<TaskInfo>> task_queues;
+    std::vector<std::thread> threads;
+    std::vector<TaskQueue*> task_queues;
     std::unordered_set<RunID> wait_list;
     std::mutex wait_list_mutex;
     void wait_list_handler(void);
     std::thread wait_list_handler_thread;
-    void worker_thread(int worker_id);
+    void worker_thread(int worker_id, TaskQueue* task_queue);
     std::condition_variable wait_list_empty_signal;
     std::queue<RunID> wait_list_action_queue;
     std::mutex wait_list_action_mutex;
     std::condition_variable wait_list_action_signal;
     std::condition_variable wait_list_active_signal;
     bool wait_list_sync_flag = false;
-    bool task_queue_sync_flag = false;
     std::condition_variable wait_list_synced, task_queue_synced;
-    std::condition_variable sync_completed;
+    std::mutex task_queue_sync_mutex;
+    std::atomic<int> task_queue_synced_count{0};
     bool stop = 0;
 #ifdef PERF
     // the number of tasks each thread has completed
