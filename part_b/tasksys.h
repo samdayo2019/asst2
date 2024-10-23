@@ -2,12 +2,11 @@
 #define _TASKSYS_H
 
 #include "itasksys.h"
-#include <atomic>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <thread>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -92,9 +91,7 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
         RunInfo(IRunnable* runnable, int num_total_tasks)
             : runnable(runnable), num_total_tasks(num_total_tasks) {}
     };
-    std::unordered_map<RunID, RunInfo*> run_records; // lookup table for run information
-    std::mutex run_records_mutex;                    // lock for the entire run_records
-
+    std::map<RunID, RunInfo*> run_records; // lookup table for run information
     RunID next_run_id = 0;
     std::vector<std::thread> thread_pool;
     std::queue<std::pair<RunID, int>> task_queue; // (run_id, task_id)
@@ -120,7 +117,6 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
     bool wait_list_sync_flag = false;
     bool ready_queue_sync_flag = false;
     bool task_queue_sync_flag = false;
-    std::mutex sync_mutex;
     std::condition_variable wait_list_synced, ready_queue_synced, task_queue_synced;
     std::condition_variable sync_completed;
     bool stop = 0;

@@ -270,21 +270,11 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
         }
 
         // Save both the run_id and run_info, compare to last run_id, if same then avoid lookup
-        if (run_id == task.first) {
-            // Run the task
-            run_info->runnable->runTask(task.second, run_info->num_total_tasks);
-        } else {
+        if (run_id != task.first) {
             run_id = task.first;
-            // Find the run info from the run_records table
-            {
-                std::lock_guard<std::mutex> lock(run_records_mutex);
-                auto run_it = run_records.find(task.first);
-                ASSERT(run_it != run_records.end());
-                run_info = run_it->second;
-            }
-            // Run the task
-            run_info->runnable->runTask(task.second, run_info->num_total_tasks);
+            run_info = run_records[task.first];
         }
+        run_info->runnable->runTask(task.second, run_info->num_total_tasks);
 
 #ifdef DEBUG
         tasks_per_thread[worker_id]++;
@@ -356,12 +346,11 @@ void TaskSystemParallelThreadPoolSleeping::ready_queue_handler() {
             ready_queue.pop();
         }
 
+        // Put this lookup outside of the lock to reduce locked time
+        RunInfo* run_info = run_records[run_id];
         // Dispatch tasks of the run to task queue
         {
             std::lock_guard<std::mutex> lock(task_queue_mutex);
-            run_records_mutex.lock();
-            RunInfo* run_info = run_records[run_id];
-            run_records_mutex.unlock();
 
             for (int i = 0; i < run_info->num_total_tasks; i++) {
                 task_queue.push(std::make_pair(run_id, i));
@@ -458,37 +447,29 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
             });
         }
 
-        // Because we must look up the run record for each dep_by, we lock the whole run_records for
-        // the entire loop
-        // TODO: need to figure out how to not lock the entire run_records
-        run_records_mutex.lock();
-
-        std::vector<RunID> became_ready;
-
         // wait_list is a set, since we know the dep_by of the run just finished, we directly
         // look them up and see if that's ready to go now
         for (RunID dep : run_records[action_run]->dep_by) {
+            auto dep_it = run_records.find(dep);
+            ASSERT(dep_it != run_records.end());
+
             // Erase this run from the dep list
-            run_records[dep]->deps.erase(action_run);
+            dep_it->second->deps.erase(action_run);
             // If no more dependencies, push the run to the ready queue and remove it from
             // wait list
-            if (run_records[dep]->deps.empty()) {
-                became_ready.push_back(dep);
+            if (dep_it->second->deps.empty()) {
+                {
+                    std::lock_guard<std::mutex> lock(ready_queue_mutex);
+                    ready_queue.push(dep_it->first);
+                    DCOUT("Run #" << dep << " moved from wait list to ready queue");
+                }
             }
-        }
-        run_records_mutex.unlock();
-
-        for (RunID run : became_ready) {
-            {
-                std::lock_guard<std::mutex> lock(ready_queue_mutex);
-                ready_queue.push(run);
-            }
-            DCOUT("Run #" << dep << " moved from wait list to ready queue");
             // Notify ready_queue_handler that there is a new run to process
             ready_queue_signal.notify_one();
             {
                 std::lock_guard<std::mutex> lock(wait_list_mutex);
-                wait_list.erase(run);
+                int ret = wait_list.erase(dep_it->first);
+                ASSERT(ret == 1);
             }
         }
     }
@@ -511,22 +492,26 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     // Record the run information
     RunInfo* run_info = new RunInfo{runnable, num_total_tasks};
     for (RunID dep : deps) {
-        // Add the dependencies to deps list if they are not done
-        // Also add this run to the dep_by of the dependencies so that when they are done we
-        // know what blocked runs to check
-        if (!run_records[dep]->is_done) {
+        RunInfo* dep_info = run_records[dep];
+
+        // TODO: whether we lock each run or not here does not matter since the dep's `is_done` can
+        // be set to true before this check is done, so it will be pushed to wait list anyway. So
+        // far, seems like that run still eventaully gets processed. Need to think through this, may
+        // have some corner cases.
+        if (!dep_info->is_done) {
+            // Add the dependencies to deps list if they are not done
             run_info->deps.insert(dep);
+            // Also add this run to the dep_by of the dependencies so that when they are done we
+            // know what blocked runs to check. Need to
             // NOTE: this assumes all the dependeices have to call this function prior to this
             // run so their records are stored
-            run_records[dep]->dep_by.insert(run_id);
+            dep_info->dep_by.insert(run_id);
         }
     }
 
-    // Lock the whole run_records to insert the new run because it may cause rehashing
-    {
-        std::lock_guard<std::mutex> lock(run_records_mutex);
-        run_records[run_id] = run_info;
-    }
+    // Because map insert won't cause rehashing and this is the only thread that would insert entry
+    // to run_records, no lock needed
+    run_records[run_id] = run_info;
 
     DCOUT("Run #" << run_id << " recorded");
 
