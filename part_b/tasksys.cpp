@@ -1,7 +1,7 @@
 #include "tasksys.h"
+#include <cassert>
 
 #ifdef DEBUG
-#include <cassert>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -29,7 +29,7 @@ void safe_print(const std::stringstream& message) {
 #else
 #define DPRINTF(...)
 #define DCOUT(...)
-#define ASSERT(cond)
+#define ASSERT(cond) assert(cond)
 #endif
 
 IRunnable::~IRunnable() {}
