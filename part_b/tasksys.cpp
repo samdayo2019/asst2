@@ -461,7 +461,7 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
             for (int i = 0; i < run_info->num_total_tasks; i++) {
                 task_queue.push(std::make_pair(run_id, i));
             }
-            DCOUT("Run #" << dep << " pushed to task queue");
+            DCOUT("Run #" << run_id << " pushed to task queue");
         }
         // notify threads that there are tasks to run
         worker_signal.notify_all();

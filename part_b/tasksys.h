@@ -9,6 +9,9 @@
 #include <thread>
 #include <unordered_set>
 #include <vector>
+#ifdef DEBUG
+#include <unordered_map>
+#endif
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
