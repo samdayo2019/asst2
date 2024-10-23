@@ -163,16 +163,16 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
 
     // Pre-allocate the thread pool so that it won't resize as we push
     threads.reserve(num_threads);
-    task_queues.reserve(num_threads);
+    workers.reserve(num_threads);
 
     wait_list_handler_thread =
         std::thread(&TaskSystemParallelThreadPoolSleeping::wait_list_handler, this);
 
     // Each thread will run the `worker_thread` function
     for (int i = 0; i < num_threads; i++) {
-        task_queues.emplace_back(new TaskQueue());
-        threads.emplace_back(&TaskSystemParallelThreadPoolSleeping::worker_thread, this, i,
-                             task_queues[i]);
+        workers.emplace_back(new Worker(i));
+        threads.emplace_back(&TaskSystemParallelThreadPoolSleeping::worker_thread, this,
+                             workers[i]);
 
 #ifdef PERF
         tasks_per_thread[i] = 0;
@@ -185,7 +185,7 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     stop = true;
     wait_list_active_signal.notify_one();
     for (int i = 0; i < num_threads; i++) {
-        task_queues[i]->signal.notify_one();
+        workers[i]->signal.notify_one();
     }
 
     // Delete all RunInfo objects in run_records
@@ -193,8 +193,8 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
         delete run_record.second;
     }
 
-    for (TaskQueue* task_queue : task_queues) {
-        delete task_queue;
+    for (Worker* worker : workers) {
+        delete worker;
     }
 
     // Join all threads
@@ -214,67 +214,67 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
 #endif
 }
 
-void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id, TaskQueue* task_queue) {
-    DCOUT("Worker thread " << worker_id << " started");
-    RunID run_id = -1;
+void TaskSystemParallelThreadPoolSleeping::worker_thread(Worker* worker) {
+    DCOUT("Worker thread " << worker->id << " started");
     RunInfo* run_info = nullptr;
 
     while (true) {
-        DCOUT("Worker thread " << worker_id << " re-entered");
-        std::pair<RunID, int> task;
+        DCOUT("Worker thread " << worker->id << " re-entered");
+        TaskInfo task;
         {
-            std::unique_lock<std::mutex> lock(task_queue->mutex);
-            task_queue->signal.wait(lock, [this, &task_queue] {
-                return !task_queue->queue.empty() || task_queue->sync_flag || stop;
+            std::unique_lock<std::mutex> lock(worker->mutex);
+            worker->signal.wait(lock, [this, &worker] {
+                return !worker->queue.empty() || worker->sync_flag || stop;
             });
 
-            DCOUT("Worker thread " << worker_id << " unblocked");
+            DCOUT("Worker thread " << worker->id << " unblocked");
 
-            if (task_queue->sync_flag && task_queue->queue.empty()) {
+            if (worker->sync_flag && worker->queue.empty()) {
                 // Since the sync function can only wait on one lock, we use a separate lock for
                 // signaling synced
                 {
-                    std::lock_guard<std::mutex> lock(task_queue_sync_mutex);
-                    DCOUT("Worker thread " << worker_id << " acknowledged sync signal");
-                    task_queue->sync_flag = false;
-                    task_queue_synced_count.fetch_add(1);
+                    std::lock_guard<std::mutex> lock(workers_sync_mutex);
+                    DCOUT("Worker thread " << worker->id << " acknowledged sync signal");
+                    worker->sync_flag = false;
+                    workers_synced_count.fetch_add(1);
                 }
-                task_queue_synced.notify_one();
+                workers_synced.notify_one();
                 continue;
             }
 
             if (stop) {
-                DCOUT("Worker thread " << worker_id << " exiting");
+                DCOUT("Worker thread " << worker->id << " exiting");
                 return;
             }
 
-            ASSERT(!task_queue->queue.empty());
-            task = task_queue->queue.front();
-            task_queue->queue.pop();
-            DCOUT("Worker thread " << worker_id << " got run #" << task.first << " task #"
-                                   << task.second);
+            ASSERT(!worker->queue.empty());
+            task = worker->queue.front();
+            worker->queue.pop();
+            DCOUT("Worker thread " << worker->id << " got run #" << task.run_id << " " << task.num
+                                   << " tasks [" << task.first << ", " << task.last << ", "
+                                   << task.step << "]");
         }
 
-        // Save both the run_id and run_info, compare to last run_id, if same then avoid lookup
-        if (run_id != task.first) {
-            run_id = task.first;
-            run_info = run_records[task.first];
+        run_info = run_records[task.run_id];
+        for (int i = task.first; i <= task.last; i += task.step) {
+            run_info->runnable->runTask(i, run_info->num_total_tasks);
         }
-        run_info->runnable->runTask(task.second, run_info->num_total_tasks);
+
+        DCOUT("Worker thread " << worker->id << " executed run #" << task.run_id << " " << task.num
+                               << " tasks [" << task.first << ", " << task.last << ", " << task.step
+                               << "]");
 
 #ifdef PERF
-        tasks_per_thread[worker_id]++;
+        tasks_per_thread[worker->id] += task.num;
 #endif
 
         // Update the number of completed tasks for this run, if all completed, mark it as done
         // Note here we only need to lock this run entry in the table so that other threads won't
-        // write to it at the same time
-        // I think insertion to run_records won't affect this pointer
+        // write to it at the same time. Insertion to run_records won't affect this pointer
         run_info->run_mutex.lock();
-        // TODO: change this to atomic and see if it improves performance
-        ++run_info->num_tasks_completed;
+        run_info->num_tasks_completed += task.num;
         if (run_info->num_tasks_completed == run_info->num_total_tasks) {
-            DCOUT("Run #" << task.first << " completed by worker thread " << worker_id);
+            DCOUT("Run #" << task.run_id << " completed by worker thread " << worker->id);
             // Mark the run as done
             run_info->is_done = true;
             run_info->run_mutex.unlock();
@@ -282,9 +282,9 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id, TaskQueu
             // Push the completed run to the action queue and notify wait_list_handler
             {
                 std::lock_guard<std::mutex> lock(wait_list_action_mutex);
-                DCOUT("Worker thread " << worker_id << " pushed run #" << task.first
+                DCOUT("Worker thread " << worker->id << " pushed run #" << task.run_id
                                        << " to action queue");
-                wait_list_action_queue.push(task.first);
+                wait_list_action_queue.push(task.run_id);
             }
             // No need to notify wait_list_signal here because if handler got blocked there it means
             // wait list is empty, so no run can become ready
@@ -308,6 +308,8 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id, TaskQueu
  */
 void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
     DCOUT("Wait list handler started");
+    int next_thread_to_enq = 0;
+
     while (true) {
         {
             // This lock makes sure only this thread is access wait_list
@@ -373,34 +375,53 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
                     action_run = wait_list_action_queue.front();
                     wait_list_action_queue.pop();
 
-                    DCOUT("Wait list handler received action signal: run " << action_run
-                                                                           << " completed");
+                    DCOUT("Wait list handler received action signal: run #" << action_run);
                     return true;
                 }
             });
         }
+
+        DCOUT("Wait list size = " << wait_list.size());
 
         // wait_list is a set, since we know the dep_by of the run just finished, we directly
         // look them up and see if that's ready to go now
         for (RunID dep : run_records[action_run]->dep_by) {
             auto dep_it = run_records.find(dep);
             ASSERT(dep_it != run_records.end());
+            DCOUT("Removeing run #" << action_run << " from run #" << dep << " deps");
 
             // Erase this run from the dep list
             dep_it->second->deps.erase(action_run);
             // If no more dependencies, push the run to the ready queue and remove it from
             // wait list
             if (dep_it->second->deps.empty()) {
-                for (int i = 0; i < num_threads; i++) {
-                    {
-                        std::lock_guard<std::mutex> lock(task_queues[i]->mutex);
-                        for (int j = i; j < dep_it->second->num_total_tasks; j += num_threads) {
-                            task_queues[i]->queue.push(std::make_pair(dep_it->first, j));
+                DCOUT("Run #" << dep << " ready to be dispatched from wait list");
+
+                // Same logic as in the run functin. Ideally we use the same `next_thread_to_enq`,
+                // but that can cause more contention so we just start from 0. I think the overall
+                // performance won't get affected too much unless the workload is of a very specific
+                // pattern
+                for (int first = 0; first < num_threads; first++) {
+                    TaskInfo task(dep_it->first, first, num_threads,
+                                  dep_it->second->num_total_tasks);
+                    if (task.num == 0) {
+                        break;
+                    } else {
+                        {
+                            std::lock_guard<std::mutex> lock(workers[next_thread_to_enq]->mutex);
+                            // Put this task in thread `next_thread_to_enq`. This is to prevent the
+                            // earlier threads from getting assigned more heavily if we always start
+                            // from therad 0
+                            workers[next_thread_to_enq]->queue.push(task);
+                            DCOUT("Wait list dispatched run #"
+                                  << dep_it->first << " " << task.num << " tasks [" << task.first
+                                  << ", " << task.last << ", " << task.step
+                                  << "] dispatched to worker thread " << next_thread_to_enq);
                         }
+                        workers[next_thread_to_enq]->signal.notify_one();
+                        next_thread_to_enq = (next_thread_to_enq + 1) % num_threads;
                     }
-                    task_queues[i]->signal.notify_one();
                 }
-                DCOUT("Run #" << dep << " dispatched from wait list");
 
                 // Remove the run from the wait list
                 {
@@ -425,7 +446,7 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     // instead of using shared variables
     RunID run_id = next_run_id++;
 
-    DCOUT("Run #" << run_id << " requested");
+    DCOUT("Run #" << run_id << " requested, number of deps = " << deps.size());
 
     // Record the run information
     RunInfo* run_info = new RunInfo{runnable, num_total_tasks};
@@ -437,6 +458,7 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
         // anyway. So far, seems like that run still eventaully gets processed. Need to think
         // through this, may have some corner cases.
         if (!dep_info->is_done) {
+            DCOUT("Run #" << run_id << " dep #" << dep << " not done");
             // Add the dependencies to deps list if they are not done
             run_info->deps.insert(dep);
             // Also add this run to the dep_by of the dependencies so that when they are done we
@@ -444,25 +466,43 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
             // NOTE: this assumes all the dependeices have to call this function prior to this
             // run so their records are stored
             dep_info->dep_by.insert(run_id);
+        } else {
+            DCOUT("Run #" << run_id << " dep #" << dep << " is done");
         }
     }
 
     // Because map insert won't cause rehashing and this is the only thread that would insert
     // entry to run_records, no lock needed
     run_records[run_id] = run_info;
-
     DCOUT("Run #" << run_id << " recorded");
 
-    // If no deps remaining, push the run to the ready queue, otherwise push it to the wait list
+    int next_thread_to_enq = 0;
+    // Divide the run into a number of "bulk tasks" determined by the number of threads and total
+    // tasks of the run. Each "bulk task" will be processed by a thread at one time
+    // There will be at most `num_threads` bulk tasks per run, but if total number of tasks is less
+    // than the available threads, need to create only that many bulk tasks
+
+    // If no deps remaining, push the run to the ready queue, otherwise push it to the wait
+    // list
     if (run_info->deps.empty()) {
-        for (int i = 0; i < num_threads; i++) {
-            {
-                std::lock_guard<std::mutex> lock(task_queues[i]->mutex);
-                for (int j = i; j < run_info->num_total_tasks; j += num_threads) {
-                    task_queues[i]->queue.push(std::make_pair(run_id, j));
+        for (int first = 0; first < num_threads; first++) {
+            TaskInfo task(run_id, first, num_threads, run_info->num_total_tasks);
+            if (task.num == 0) {
+                break;
+            } else {
+                {
+                    std::lock_guard<std::mutex> lock(workers[next_thread_to_enq]->mutex);
+                    // Put this task in thread `next_thread_to_enq`. This is to prevent the earlier
+                    // threads from getting assigned more heavily if we always start from therad 0
+                    workers[next_thread_to_enq]->queue.push(task);
+                    DCOUT("Run #" << task.run_id << " " << task.num << " tasks [" << task.first
+                                  << ", " << task.last << ", " << task.step
+                                  << "] directly dispatched to worker thread "
+                                  << next_thread_to_enq);
                 }
+                workers[next_thread_to_enq]->signal.notify_one();
+                next_thread_to_enq = (next_thread_to_enq + 1) % num_threads;
             }
-            task_queues[i]->signal.notify_one();
         }
     } else {
         {
@@ -473,7 +513,6 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
         // Tell wait_list_handler that there's new item pushed
         wait_list_active_signal.notify_one();
     }
-
     return run_id;
 }
 
@@ -500,17 +539,17 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
 
     for (int i = 0; i < num_threads; i++) {
         {
-            std::lock_guard<std::mutex> lock(task_queues[i]->mutex);
-            task_queues[i]->sync_flag = true;
+            std::lock_guard<std::mutex> lock(workers[i]->mutex);
+            workers[i]->sync_flag = true;
             DCOUT("Task queue " << i << " sync called");
         }
-        task_queues[i]->signal.notify_one();
+        workers[i]->signal.notify_one();
     }
 
     {
-        std::unique_lock<std::mutex> lock(task_queue_sync_mutex);
-        task_queue_synced.wait(lock, [this] { return task_queue_synced_count == num_threads; });
-        task_queue_synced_count = 0;
+        std::unique_lock<std::mutex> lock(workers_sync_mutex);
+        workers_synced.wait(lock, [this] { return workers_synced_count == num_threads; });
+        workers_synced_count = 0;
         DCOUT("Task queue synced");
     }
 

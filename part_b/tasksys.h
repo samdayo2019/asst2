@@ -96,33 +96,54 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
             : runnable(runnable), num_total_tasks(num_total_tasks) {}
     };
 
-    struct TaskQueue {
-        std::queue<std::pair<RunID, int>> queue; // (run_id, task_id)
+    struct TaskInfo {
+        RunID run_id;
+        int first;
+        int last;
+        int step;
+        int num;
+        TaskInfo() {}
+        TaskInfo(RunID run_id, int first, int step, int total_tasks)
+            : run_id(run_id), first(first), step(step) {
+
+            if (first >= total_tasks) {
+                num = 0;
+            } else {
+                num = (total_tasks - 1 - first) / step + 1;
+                last = first + (num - 1) * step;
+            }
+        }
+    };
+
+    struct Worker {
+        int id;
+        std::queue<TaskInfo> queue;
         std::mutex mutex;
         std::condition_variable signal;
         bool sync_flag = false;
-
+        
+        Worker(int id) : id(id) {}
     };
 
     int num_threads;
     std::map<RunID, RunInfo*> run_records; // lookup table for run information
     RunID next_run_id = 0;
     std::vector<std::thread> threads;
-    std::vector<TaskQueue*> task_queues;
+    std::vector<Worker*> workers;
     std::unordered_set<RunID> wait_list;
     std::mutex wait_list_mutex;
     void wait_list_handler(void);
     std::thread wait_list_handler_thread;
-    void worker_thread(int worker_id, TaskQueue* task_queue);
+    void worker_thread(Worker* worker);
     std::condition_variable wait_list_empty_signal;
     std::queue<RunID> wait_list_action_queue;
     std::mutex wait_list_action_mutex;
     std::condition_variable wait_list_action_signal;
     std::condition_variable wait_list_active_signal;
     bool wait_list_sync_flag = false;
-    std::condition_variable wait_list_synced, task_queue_synced;
-    std::mutex task_queue_sync_mutex;
-    std::atomic<int> task_queue_synced_count{0};
+    std::condition_variable wait_list_synced, workers_synced;
+    std::mutex workers_sync_mutex;
+    std::atomic<int> workers_synced_count{0};
     bool stop = 0;
 #ifdef PERF
     // the number of tasks each thread has completed
