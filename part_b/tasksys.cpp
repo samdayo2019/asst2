@@ -159,6 +159,8 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
 
     DCOUT("Constructor called");
 
+    this->num_threads = num_threads;
+
     // Pre-allocate the thread pool so that it won't resize as we push
     thread_pool.reserve(num_threads);
     // task_queues.resize(num_threads);
@@ -209,7 +211,7 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
     RunInfo* run_info = nullptr;
 
     while (true) {
-        std::pair<RunID, int> task;
+        TaskInfo task;
         {
             std::unique_lock<std::mutex> lock(task_queue_mutex);
             worker_signal.wait(
@@ -258,8 +260,8 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
             if (!task_queue.empty()) {
                 task = task_queue.front();
                 task_queue.pop();
-                DCOUT("Worker thread " << worker_id << " got run #" << task.first << " task #"
-                                       << task.second);
+                DCOUT("Worker thread " << worker_id << " got run #" << task.run_id << " task ["
+                                       << task.task_first << ", " << task.task_last << "]");
 
             } else {
                 // TODO: this will cause busy wait until sync flag is unset. It occurs only at the
@@ -270,14 +272,17 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
         }
 
         // Save both the run_id and run_info, compare to last run_id, if same then avoid lookup
-        if (run_id != task.first) {
-            run_id = task.first;
-            run_info = run_records[task.first];
+        if (run_id != task.run_id) {
+            run_id = task.run_id;
+            run_info = run_records[task.run_id];
         }
-        run_info->runnable->runTask(task.second, run_info->num_total_tasks);
-
+        for (int i = task.task_first; i <= task.task_last; i++) {
+            run_info->runnable->runTask(i, run_info->num_total_tasks);
+        }
+        DCOUT("Worker thread " << worker_id << " executed run #" << run_id << " task ["
+                               << task.task_first << ", " << task.task_last << "]");
 #ifdef PERF
-        tasks_per_thread[worker_id]++;
+        tasks_per_thread[worker_id] += task.task_last - task.task_first + 1;
 #endif
 
         // Update the number of completed tasks for this run, if all completed, mark it as done
@@ -285,10 +290,9 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
         // write to it at the same time
         // I think insertion to run_records won't affect this pointer
         run_info->run_mutex.lock();
-        // TODO: change this to atomic and see if it improves performance
-        ++run_info->num_tasks_completed;
+        run_info->num_tasks_completed += task.task_last - task.task_first + 1;
         if (run_info->num_tasks_completed == run_info->num_total_tasks) {
-            DCOUT("Run #" << task.first << " completed by worker thread " << worker_id);
+            DCOUT("Run #" << run_id << " completed by worker thread " << worker_id);
             // Mark the run as done
             run_info->is_done = true;
             run_info->run_mutex.unlock();
@@ -296,9 +300,9 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
             // Push the completed run to the action queue and notify wait_list_handler
             {
                 std::lock_guard<std::mutex> lock(wait_list_action_mutex);
-                DCOUT("Worker thread " << worker_id << " pushed run #" << task.first
+                DCOUT("Worker thread " << worker_id << " pushed run #" << run_id
                                        << " to action queue");
-                wait_list_action_queue.push(task.first);
+                wait_list_action_queue.push(run_id);
             }
             // No need to notify wait_list_signal here because if handler got blocked there it means
             // wait list is empty, so no run can become ready
@@ -406,10 +410,20 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
             // wait list
             if (dep_it->second->deps.empty()) {
                 {
+                    int num_tasks = dep_it->second->num_total_tasks / num_threads == 0 ? 1
+                                                                                      : dep_it->second->num_total_tasks /
+                                                                                            num_threads;
                     std::lock_guard<std::mutex> lock(task_queue_mutex);
-                    for (int i = 0; i < dep_it->second->num_total_tasks; i++) {
-                        task_queue.push(std::make_pair(dep_it->first, i));
+                    int i = 0;
+                    while (i < dep_it->second->num_total_tasks) {
+                        int task_first = i;
+                        int task_last =
+                            std::min(i + num_tasks - 1, dep_it->second->num_total_tasks - 1);
+
+                        task_queue.push(TaskInfo(dep_it->first, task_first, task_last));
+                        i = task_last + 1;
                     }
+
                     DCOUT("Run #" << dep << " moved from wait list to task queue");
                 }
                 // notify threads that there are tasks to run
@@ -467,10 +481,19 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     // If no deps remaining, push the run to the ready queue, otherwise push it to the wait list
     if (run_info->deps.empty()) {
         {
+            int num_tasks = run_info->num_total_tasks / num_threads == 0 ? 1
+                                                                        : run_info->num_total_tasks /
+                                                                              num_threads;
             std::lock_guard<std::mutex> lock(task_queue_mutex);
-            for (int i = 0; i < run_info->num_total_tasks; i++) {
-                task_queue.push(std::make_pair(run_id, i));
+            int i = 0;
+            while (i < run_info->num_total_tasks) {
+                int task_first = i;
+                int task_last = std::min(i + num_tasks - 1, run_info->num_total_tasks - 1);
+
+                task_queue.push(TaskInfo(run_id, task_first, task_last));
+                i = task_last + 1;
             }
+
             DCOUT("Run #" << run_id << " pushed to task queue");
         }
         // notify threads that there are tasks to run

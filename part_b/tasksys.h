@@ -94,10 +94,19 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
         RunInfo(IRunnable* runnable, int num_total_tasks)
             : runnable(runnable), num_total_tasks(num_total_tasks) {}
     };
+    struct TaskInfo {
+        RunID run_id;
+        int task_first;
+        int task_last;
+        TaskInfo(RunID run_id, int task_first, int task_last)
+            : run_id(run_id), task_first(task_first), task_last(task_last) {}
+        TaskInfo() {}
+    };
+    int num_threads;
     std::map<RunID, RunInfo*> run_records; // lookup table for run information
     RunID next_run_id = 0;
     std::vector<std::thread> thread_pool;
-    std::queue<std::pair<RunID, int>> task_queue; // (run_id, task_id)
+    std::queue<TaskInfo> task_queue;
     std::mutex task_queue_mutex;
     std::condition_variable worker_signal; // signal to wake up worker thread
     // std::vector<std::queue<TaskInfo>> task_queues;
