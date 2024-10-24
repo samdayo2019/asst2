@@ -160,14 +160,14 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     DCOUT("Constructor called");
 
     // Pre-allocate the thread pool so that it won't resize as we push
-    thread_pool.reserve(num_threads);
+    thread_pool.reserve(num_threads-1);
     // task_queues.resize(num_threads);
 
     wait_list_handler_thread =
         std::thread(&TaskSystemParallelThreadPoolSleeping::wait_list_handler, this);
 
     // Each thread will run the `thread_worker` function
-    for (int i = 0; i < num_threads; i++) {
+    for (int i = 0; i < num_threads-1; i++) {
         thread_pool.emplace_back(&TaskSystemParallelThreadPoolSleeping::worker_thread, this, i);
 #ifdef PERF
         tasks_per_thread[i] = 0;
