@@ -96,11 +96,20 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
     };
     struct TaskInfo {
         RunID run_id;
-        int task_first;
-        int task_last;
-        TaskInfo(RunID run_id, int task_first, int task_last)
-            : run_id(run_id), task_first(task_first), task_last(task_last) {}
+        int first;
+        int last;
+        int step;
+        int num;
         TaskInfo() {}
+        TaskInfo(RunID run_id, int first, int step, int total_tasks)
+            : run_id(run_id), first(first), step(step) {
+            if (first >= total_tasks) {
+                num = 0;
+            } else {
+                num = (total_tasks - 1 - first) / step + 1;
+                last = first + (num - 1) * step;
+            }
+        }
     };
     int num_threads;
     std::map<RunID, RunInfo*> run_records; // lookup table for run information
