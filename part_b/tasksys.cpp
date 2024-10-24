@@ -293,14 +293,14 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
         // Note here we only need to lock this run entry in the table so that other threads won't
         // write to it at the same time
         // I think insertion to run_records won't affect this pointer
-        run_info->run_mutex.lock();
         // TODO: change this to atomic and see if it improves performance
-        ++run_info->num_tasks_completed;
-        if (run_info->num_tasks_completed == run_info->num_total_tasks) {
+	int completed =	run_info->num_tasks_completed.fetch_add(1);
+        if (completed == run_info->num_total_tasks - 1) {
             DCOUT("Run #" << task.first << " completed by worker thread " << worker_id);
             // Mark the run as done
+            // run_info->run_mutex.lock();
             run_info->is_done = true;
-            run_info->run_mutex.unlock();
+            // run_info->run_mutex.unlock();
 
             // Push the completed run to the action queue and notify wait_list_handler
             {
@@ -312,9 +312,7 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
             // No need to notify wait_list_signal here because if handler got blocked there it means
             // wait list is empty, so no run can become ready
             wait_list_action_signal.notify_one();
-        } else {
-            run_info->run_mutex.unlock();
-        }
+        } 
     }
 }
 

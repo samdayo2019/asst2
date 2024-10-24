@@ -9,6 +9,7 @@
 #include <thread>
 #include <unordered_set>
 #include <vector>
+#include <atomic>
 #ifdef PERF
 #include <unordered_map>
 #endif
@@ -87,7 +88,7 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
         int num_total_tasks;
         std::unordered_set<RunID> dep_by; // depended by
         std::unordered_set<RunID> deps;   // depending on
-        int num_tasks_completed = 0;
+	std::atomic<int> num_tasks_completed{0};
         bool is_done = false;
         std::mutex run_mutex;
 
