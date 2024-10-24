@@ -308,8 +308,14 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id, TaskQueu
  */
 void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
     DCOUT("Wait list handler started");
+
+    static int next_thread_to_enq = 0;
+
     while (true) {
         {
+
+            DCOUT("Wait list handler re-entered");
+
             // This lock makes sure only this thread is access wait_list
             std::unique_lock<std::mutex> lock(wait_list_mutex);
 
@@ -373,8 +379,7 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
                     action_run = wait_list_action_queue.front();
                     wait_list_action_queue.pop();
 
-                    DCOUT("Wait list handler received action signal: run " << action_run
-                                                                           << " completed");
+                    DCOUT("Wait list handler received action signal: run " << action_run);
                     return true;
                 }
             });
@@ -393,13 +398,16 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
             if (dep_it->second->deps.empty()) {
                 for (int i = 0; i < num_threads; i++) {
                     {
-                        std::lock_guard<std::mutex> lock(task_queues[i]->mutex);
+                        std::lock_guard<std::mutex> lock(task_queues[next_thread_to_enq]->mutex);
                         for (int j = i; j < dep_it->second->num_total_tasks; j += num_threads) {
-                            task_queues[i]->queue.push(std::make_pair(dep_it->first, j));
+                            task_queues[next_thread_to_enq]->queue.push(
+                                std::make_pair(dep_it->first, j));
                         }
                     }
-                    task_queues[i]->signal.notify_one();
+                    task_queues[next_thread_to_enq]->signal.notify_one();
+                    next_thread_to_enq = (next_thread_to_enq + 1) % num_threads;
                 }
+                next_thread_to_enq = (next_thread_to_enq + dep_it->second->num_total_tasks) % num_threads;
                 DCOUT("Run #" << dep << " dispatched from wait list");
 
                 // Remove the run from the wait list
@@ -453,17 +461,26 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
 
     DCOUT("Run #" << run_id << " recorded");
 
+    static int next_thread_to_enq = 0;
+
     // If no deps remaining, push the run to the ready queue, otherwise push it to the wait list
     if (run_info->deps.empty()) {
         for (int i = 0; i < num_threads; i++) {
             {
-                std::lock_guard<std::mutex> lock(task_queues[i]->mutex);
+                std::lock_guard<std::mutex> lock(task_queues[next_thread_to_enq]->mutex);
                 for (int j = i; j < run_info->num_total_tasks; j += num_threads) {
-                    task_queues[i]->queue.push(std::make_pair(run_id, j));
+                    task_queues[next_thread_to_enq]->queue.push(std::make_pair(run_id, j));
                 }
             }
-            task_queues[i]->signal.notify_one();
+            task_queues[next_thread_to_enq]->signal.notify_one();
+            next_thread_to_enq = (next_thread_to_enq + 1) % num_threads;
         }
+        // This is the thread that took one last task, so start form here next time
+        // it's supposed to add the next_thread_to_enq before this section of code started (e.g.
+        // before its value was changed), but note how the loop bound is num_threads, so the final
+        // value stays the same
+        next_thread_to_enq = (next_thread_to_enq + run_info->num_total_tasks) % num_threads;
+
     } else {
         {
             std::lock_guard<std::mutex> lock(wait_list_mutex);
