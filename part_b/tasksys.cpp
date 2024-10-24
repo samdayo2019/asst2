@@ -526,8 +526,7 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
     // Print out the number of tasks completed by each thread
     // Somehow this prints some threads twice..
     for (auto& pair : tasks_per_thread) {
-        std::cout << "Thread " << pair.first << " completed " << pair.second << " tasks"
-                  << std::endl;
+        DCOUT("Thread " << pair.first << " completed " << pair.second << " tasks");
         pair.second = 0;
     }
     printf("\n");
