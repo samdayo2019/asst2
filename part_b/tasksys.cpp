@@ -308,10 +308,12 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(Worker* worker) {
  */
 void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
     DCOUT("Wait list handler started");
-    int next_thread_to_enq = 0;
+    static int next_thread_to_enq = 0;
 
     while (true) {
         {
+            DCOUT("Wait list handler re-entered");
+
             // This lock makes sure only this thread is access wait_list
             std::unique_lock<std::mutex> lock(wait_list_mutex);
 
@@ -422,6 +424,8 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
                         next_thread_to_enq = (next_thread_to_enq + 1) % num_threads;
                     }
                 }
+                next_thread_to_enq =
+                    (next_thread_to_enq + dep_it->second->num_total_tasks) % num_threads;
 
                 // Remove the run from the wait list
                 {
@@ -476,7 +480,7 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     run_records[run_id] = run_info;
     DCOUT("Run #" << run_id << " recorded");
 
-    int next_thread_to_enq = 0;
+    static int next_thread_to_enq = 0;
     // Divide the run into a number of "bulk tasks" determined by the number of threads and total
     // tasks of the run. Each "bulk task" will be processed by a thread at one time
     // There will be at most `num_threads` bulk tasks per run, but if total number of tasks is less
@@ -504,6 +508,8 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
                 next_thread_to_enq = (next_thread_to_enq + 1) % num_threads;
             }
         }
+        next_thread_to_enq = (next_thread_to_enq + run_info->num_total_tasks) % num_threads;
+
     } else {
         {
             std::lock_guard<std::mutex> lock(wait_list_mutex);
