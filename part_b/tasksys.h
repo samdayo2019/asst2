@@ -119,6 +119,7 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
 #ifdef PERF
     // the number of tasks each thread has completed
     std::unordered_map<int, int> tasks_per_thread;
+    std::unordered_map<int, int> thread_unblocked;
 #endif
 };
 
