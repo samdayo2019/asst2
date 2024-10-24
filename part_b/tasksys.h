@@ -101,7 +101,6 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
         std::mutex mutex;
         std::condition_variable signal;
         bool sync_flag = false;
-
     };
 
     int num_threads;
@@ -127,6 +126,8 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
 #ifdef PERF
     // the number of tasks each thread has completed
     std::unordered_map<int, int> tasks_per_thread;
+    std::unordered_map<int, int> thread_unblocked;
+
 #endif
 };
 

@@ -176,6 +176,8 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
 
 #ifdef PERF
         tasks_per_thread[i] = 0;
+        thread_unblocked[i] = 0;
+
 #endif
     }
 }
@@ -210,6 +212,11 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
         std::cout << "Thread " << pair.first << " completed " << pair.second << " tasks"
                   << std::endl;
     }
+
+    for (auto& pair : thread_unblocked) {
+        std::cout << "Thread " << pair.first << " unblocked " << pair.second << " times"
+                  << std::endl;
+    }
     printf("\n");
 #endif
 }
@@ -229,6 +236,10 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id, TaskQueu
             });
 
             DCOUT("Worker thread " << worker_id << " unblocked");
+
+#ifdef PERF
+            thread_unblocked[worker_id]++;
+#endif
 
             if (task_queue->sync_flag && task_queue->queue.empty()) {
                 // Since the sync function can only wait on one lock, we use a separate lock for
@@ -407,7 +418,8 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
                     task_queues[next_thread_to_enq]->signal.notify_one();
                     next_thread_to_enq = (next_thread_to_enq + 1) % num_threads;
                 }
-                next_thread_to_enq = (next_thread_to_enq + dep_it->second->num_total_tasks) % num_threads;
+                next_thread_to_enq =
+                    (next_thread_to_enq + dep_it->second->num_total_tasks) % num_threads;
                 DCOUT("Run #" << dep << " dispatched from wait list");
 
                 // Remove the run from the wait list
