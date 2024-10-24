@@ -1,8 +1,8 @@
 #include "tasksys.h"
 #include <cassert>
+#include <iostream>
 
 #ifdef DEBUG
-#include <iostream>
 #include <sstream>
 #include <stdexcept>
 std::mutex cout_mutex; // Mutex for thread-safe printing
@@ -169,7 +169,7 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     // Each thread will run the `thread_worker` function
     for (int i = 0; i < num_threads; i++) {
         thread_pool.emplace_back(&TaskSystemParallelThreadPoolSleeping::worker_thread, this, i);
-#ifdef DEBUG
+#ifdef PERF
         tasks_per_thread[i] = 0;
 #endif
     }
@@ -191,6 +191,16 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     for (std::thread& thread : thread_pool) {
         thread.join();
     }
+
+#ifdef PERF
+    // Print out the number of tasks completed by each thread
+    // Somehow this prints some threads twice..
+    for (auto& pair : tasks_per_thread) {
+        std::cout << "Thread " << pair.first << " completed " << pair.second << " tasks"
+                  << std::endl;
+    }
+    printf("\n");
+#endif
 }
 
 void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
@@ -266,7 +276,7 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
         }
         run_info->runnable->runTask(task.second, run_info->num_total_tasks);
 
-#ifdef DEBUG
+#ifdef PERF
         tasks_per_thread[worker_id]++;
 #endif
 
@@ -523,13 +533,16 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
     // }
 
 #ifdef DEBUG
+#ifdef PERF
     // Print out the number of tasks completed by each thread
     // Somehow this prints some threads twice..
     for (auto& pair : tasks_per_thread) {
-        DCOUT("Thread " << pair.first << " completed " << pair.second << " tasks");
+        std::cout << "Thread " << pair.first << " completed " << pair.second << " tasks"
+                  << std::endl;
         pair.second = 0;
     }
     printf("\n");
+#endif
 #endif
 }
 

@@ -26,7 +26,13 @@ clean:
 	/bin/rm -rf $(OBJDIR) *.ppm *~ $(APP_NAME)
 
 debug: CXXFLAGS += -DDEBUG -g
+ifdef PERF
+debug: CXXFLAGS += -DPERF
+endif
 debug: $(APP_NAME)
+
+perf: CXXFLAGS += -DPERF
+perf: $(APP_NAME)
 
 OBJS=$(PPM_OBJ) $(OBJDIR)/tasksys.o
 

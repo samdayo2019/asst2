@@ -9,7 +9,7 @@
 #include <thread>
 #include <unordered_set>
 #include <vector>
-#ifdef DEBUG
+#ifdef PERF
 #include <unordered_map>
 #endif
 
@@ -116,7 +116,7 @@ class TaskSystemParallelThreadPoolSleeping : public ITaskSystem {
     std::condition_variable wait_list_synced, task_queue_synced;
     std::condition_variable sync_completed;
     bool stop = 0;
-#ifdef DEBUG
+#ifdef PERF
     // the number of tasks each thread has completed
     std::unordered_map<int, int> tasks_per_thread;
 #endif
