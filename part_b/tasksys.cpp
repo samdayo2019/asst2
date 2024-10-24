@@ -488,7 +488,7 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
                     task_queue.push(task);
                 }
             }
-            // DCOUT("Run #" << run_id << " pushed to task queue");
+            DCOUT("Run #" << run_id << " pushed to task queue");
         }
         // notify threads that there are tasks to run
         worker_signal.notify_all();
