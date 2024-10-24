@@ -407,10 +407,15 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
             // If no more dependencies, push the run to the ready queue and remove it from
             // wait list
             if (dep_it->second->deps.empty()) {
+
+                int num_bulk_tasks = dep_it->second->num_total_tasks / 4 == 0
+                                         ? dep_it->second->num_total_tasks
+                                         : dep_it->second->num_total_tasks / 4;
+
                 {
                     std::lock_guard<std::mutex> lock(task_queue_mutex);
-                    for (int first = 0; first < num_threads; first++) {
-                        TaskInfo task(dep_it->first, first, num_threads,
+                    for (int first = 0; first < num_bulk_tasks; first++) {
+                        TaskInfo task(dep_it->first, first, num_bulk_tasks,
                                       dep_it->second->num_total_tasks);
                         if (task.num == 0) {
                             break;
@@ -478,10 +483,17 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     // If no deps remaining, push the run to the ready queue, otherwise push it to the wait list
     if (run_info->deps.empty()) {
         {
+            // Divide totoal number of tasks into a `num_bulk_tasks` number of bulk tasks.
+            // Bulk tasks are interleaved, i.e. each bulk task contains a number of tasks, each
+            // separated by a step of `num_bulk_tasks`. The number of bulk tasks is determined by
+            // the divisor we give, which is based on herustics.
+            // The goal here is to reduce the number of times workers have to take from the task
+            // queue and do more work each time. Interleaving helps with load balancing.
+            int num_bulk_tasks = num_total_tasks / 4 == 0 ? num_total_tasks : num_total_tasks / 4;
             // It seems like less locking is better, even though the critical section is larger
             std::lock_guard<std::mutex> lock(task_queue_mutex);
-            for (int first = 0; first < num_threads; first++) {
-                TaskInfo task(run_id, first, num_threads, run_info->num_total_tasks);
+            for (int first = 0; first < num_bulk_tasks; first++) {
+                TaskInfo task(run_id, first, num_bulk_tasks, run_info->num_total_tasks);
                 if (task.num == 0) {
                     break;
                 } else {
