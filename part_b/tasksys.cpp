@@ -211,9 +211,12 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
     while (true) {
         std::pair<RunID, int> task;
         {
+            DCOUT("Worker thread " << worker_id << " re-entered");
             std::unique_lock<std::mutex> lock(task_queue_mutex);
             worker_signal.wait(
                 lock, [this] { return !task_queue.empty() || task_queue_sync_flag || stop; });
+
+            DCOUT("Worker thread " << worker_id << " unblocked");
 
             if (task_queue_sync_flag && task_queue.empty()) {
                 DCOUT("Worker thread " << worker_id << " received sync signal");
@@ -253,20 +256,11 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
                 return;
             }
 
-            // task queue may be empty if sync is called, and the final task has been pop by another
-            // thread but it's still working on it
-            if (!task_queue.empty()) {
-                task = task_queue.front();
-                task_queue.pop();
-                DCOUT("Worker thread " << worker_id << " got run #" << task.first << " task #"
-                                       << task.second);
-
-            } else {
-                // TODO: this will cause busy wait until sync flag is unset. It occurs only at the
-                // very end of a sync call so it's infrequent
-                DCOUT("Worker thread " << worker_id << " woke up but no task to run");
-                continue;
-            }
+            ASSERT(!task_queue.empty());
+            task = task_queue.front();
+            task_queue.pop();
+            DCOUT("Worker thread " << worker_id << " got run #" << task.first << " task "
+                                   << task.second);
         }
 
         // Save both the run_id and run_info, compare to last run_id, if same then avoid lookup
@@ -275,6 +269,9 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
             run_info = run_records[task.first];
         }
         run_info->runnable->runTask(task.second, run_info->num_total_tasks);
+
+        DCOUT("Worker thread " << worker_id << " executed run #" << task.first << " task "
+                               << task.second);
 
 #ifdef PERF
         tasks_per_thread[worker_id]++;
@@ -324,6 +321,8 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
     DCOUT("Wait list handler started");
     while (true) {
         {
+            DCOUT("Wait list handler re-entered");
+
             // This lock makes sure only this thread is access wait_list
             std::unique_lock<std::mutex> lock(wait_list_mutex);
 
@@ -387,18 +386,20 @@ void TaskSystemParallelThreadPoolSleeping::wait_list_handler(void) {
                     action_run = wait_list_action_queue.front();
                     wait_list_action_queue.pop();
 
-                    DCOUT("Wait list handler received action signal: run " << action_run
-                                                                           << " completed");
+                    DCOUT("Wait list handler received action signal: run " << action_run);
                     return true;
                 }
             });
         }
+
+        DCOUT("Wait list size = " << wait_list.size());
 
         // wait_list is a set, since we know the dep_by of the run just finished, we directly
         // look them up and see if that's ready to go now
         for (RunID dep : run_records[action_run]->dep_by) {
             auto dep_it = run_records.find(dep);
             ASSERT(dep_it != run_records.end());
+            DCOUT("Removeing run #" << action_run << " from run #" << dep << " deps");
 
             // Erase this run from the dep list
             dep_it->second->deps.erase(action_run);
@@ -436,7 +437,7 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     // instead of using shared variables
     RunID run_id = next_run_id++;
 
-    DCOUT("Run #" << run_id << " requested");
+    DCOUT("Run #" << run_id << " requested, number of deps = " << deps.size());
 
     // Record the run information
     RunInfo* run_info = new RunInfo{runnable, num_total_tasks};
@@ -448,6 +449,8 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
         // far, seems like that run still eventaully gets processed. Need to think through this, may
         // have some corner cases.
         if (!dep_info->is_done) {
+            DCOUT("Run #" << run_id << " dep #" << dep << " not done");
+
             // Add the dependencies to deps list if they are not done
             run_info->deps.insert(dep);
             // Also add this run to the dep_by of the dependencies so that when they are done we
@@ -455,13 +458,14 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
             // NOTE: this assumes all the dependeices have to call this function prior to this
             // run so their records are stored
             dep_info->dep_by.insert(run_id);
+        } else {
+            DCOUT("Run #" << run_id << " dep #" << dep << " is done");
         }
     }
 
     // Because map insert won't cause rehashing and this is the only thread that would insert entry
     // to run_records, no lock needed
     run_records[run_id] = run_info;
-
     DCOUT("Run #" << run_id << " recorded");
 
     // If no deps remaining, push the run to the ready queue, otherwise push it to the wait list
