@@ -172,6 +172,7 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
         thread_pool.emplace_back(&TaskSystemParallelThreadPoolSleeping::worker_thread, this, i);
 #ifdef PERF
         tasks_per_thread[i] = 0;
+        thread_unblocked[i] = 0;
 #endif
     }
 }
@@ -200,6 +201,12 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
         std::cout << "Thread " << pair.first << " completed " << pair.second << " tasks"
                   << std::endl;
     }
+    
+  for (auto& pair : thread_unblocked) {
+    std::cout << "Thread " << pair.first << " unblocked " << pair.second << " times"
+    << std::endl;
+  }
+
     printf("\n");
 #endif
 }
@@ -213,6 +220,9 @@ void TaskSystemParallelThreadPoolSleeping::worker_thread(int worker_id) {
         TaskInfo task;
         {
             DCOUT("Worker thread " << worker_id << " re-entered");
+#ifdef PERF
+      thread_unblocked[worker_id]++;
+#endif
             std::unique_lock<std::mutex> lock(task_queue_mutex);
             worker_signal.wait(
                 lock, [this] { return !task_queue.empty() || task_queue_sync_flag || stop; });
